@@ -1,0 +1,23 @@
+version = 1
+revision = 2
+requires-python = ">=3.12"
+
+[[package]]
+name = "agent-shell-py"
+version = "0.1.17"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6d/ae/bd7bce75fc1d81c79a103977b10f9ac412e30d955cd54ea8db3427d3a427/agent_shell_py-0.1.17.tar.gz", hash = "sha256:730956ae688b0383c48e12f6e286f8d27c5fe519db29a5d8ef563a406b481d8c", size = 118318, upload-time = "2026-07-10T21:25:00.746Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/b7/40d53a1db572daa5701de131f99b64acae28acc99ed45fea70a2d4e7207a/agent_shell_py-0.1.17-py3-none-any.whl", hash = "sha256:5a6f9657dda55cd64d97e9d66fa594700d1b519184a453bb3888822e42a2dc14", size = 39626, upload-time = "2026-07-10T21:24:59.452Z" },
+]
+
+[[package]]
+name = "pi-agent-shell-runtime"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "agent-shell-py" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "agent-shell-py", specifier = "==0.1.17" }]
