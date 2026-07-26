@@ -16,6 +16,16 @@ async def main() -> int:
     if not isinstance(request, dict):
         raise ValueError("request must be a JSON object")
 
+    if request.get("operation") == "list_agent_types": 
+        emit({
+            "kind": "agent_types",
+            "agent_types": [
+                agent_type.value
+                for agent_type in AgentType
+            ], 
+        })
+        return 0 
+
     raw_agent_type = require_string(request, "agent_type")
     cwd = require_string(request, "cwd")
     prompt = require_string(request, "prompt")

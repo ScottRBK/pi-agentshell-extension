@@ -47,9 +47,24 @@ interface WorkerMessage {
     event?: AgentEvent;
 }
 
-export async function runAgentShell(
-    request: AgentRequest,
-): Promise<RunResult> {
+interface WorkerProcessResult {
+   exitCode: number | null;
+   stdout: string;
+   stderr: string;
+}
+
+interface AgentTypesMessage {
+   kind?: unknown;
+   agent_types?: unknown;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+   return typeof value === "string" && value.trim().length > 0;
+}
+
+async function invokeWorker(
+    request: object,
+): Promise<WorkerProcessResult> {
     const child = spawn(
         PYTHON,
         ["-I", "-u", WORKER],
@@ -84,6 +99,54 @@ export async function runAgentShell(
         child.stdin.on("error", () => {});
         child.stdin.end(JSON.stringify(request));
     });
+
+    return {
+        exitCode,
+        stdout,
+        stderr,
+    }
+}
+
+export async function getSupportedAgentTypes(): Promise<string[]> {
+    const { exitCode, stdout, stderr } = await invokeWorker({operation: "list_agent_types"});
+
+    if (exitCode !== 0 ) {
+        const diagnostic = stderr.trim();
+        const suffix = diagnostic ? `: ${diagnostic}` : "";
+
+        throw new Error(
+            `AgentShell worker exited with code ${exitCode}${suffix}`,
+        );
+    }
+
+    const lines = stdout
+        .split(/\r?\n/)
+        .filter((line) => line.trim().length > 0);
+
+    if (lines.length !== 1 ){
+        throw new Error("AgentShell worker returned invalid agent types");
+    }
+
+    const message = JSON.parse(lines[0]) as AgentTypesMessage; 
+    const agentTypes = message.agent_types; 
+
+    if (
+        message.kind !== "agent_types" ||
+        !Array.isArray(agentTypes) ||
+        agentTypes.length === 0 ||
+        !agentTypes.every(isNonEmptyString)
+    ) {
+        throw new Error("AgentShell worker returned invalid agent types");
+    }
+
+    return agentTypes 
+}
+
+export async function runAgentShell(
+    request: AgentRequest,
+): Promise<RunResult> {
+
+    const { exitCode, stdout, stderr } = await invokeWorker(request);
 
     const output: string[] = [];
     let status: RunDetails["status"] | undefined;

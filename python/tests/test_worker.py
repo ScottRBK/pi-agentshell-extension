@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import unittest
+from agent_shell.models.agent import AgentType 
 
 from pathlib import Path
 
@@ -12,6 +13,29 @@ WORKER = PYTHON_DIR / "worker.py"
 FAKE_BIN = PYTHON_DIR / "tests" / "fixtures" / "bin"
 
 class WorkerProtocolTest(unittest.TestCase):
+    def test_lists_agent_types_from_agent_shell(self) -> None:
+       completed, messages = self.run_worker({
+           "operation": "list_agent_types",
+       })
+
+       self.assertEqual(
+           completed.returncode,
+           0,
+           f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+       )
+       self.assertEqual(
+           messages,
+           [
+               {
+                   "kind": "agent_types",
+                   "agent_types": [
+                       agent_type.value
+                       for agent_type in AgentType
+                   ],
+               },
+           ],
+       )
+
     def test_fails_when_terminal_result_reports_error(self) -> None:
        request = {
            "agent_type": "claude_code",
