@@ -1,0 +1,4 @@
+#!/bin/sh
+
+printf '%s\n' \
+   '{"type":"result","is_error":true,"session_id":"failed-session"}'

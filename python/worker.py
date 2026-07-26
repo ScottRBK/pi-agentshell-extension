@@ -1,27 +1,55 @@
 import asyncio
-import json 
-import sys 
+import json
+import sys
+import warnings
 
-from dataclasses import asdict 
+from dataclasses import asdict
 
 from agent_shell.models.agent import AgentType
-from agent_shell.shell import AgentShell 
+from agent_shell.shell import AgentShell
 
 
 
-async def main() -> int: 
+async def main() -> int:
     request = json.load(sys.stdin)
-    raw_agent_type = request.get("agent_type")
+
+    if not isinstance(request, dict):
+        raise ValueError("request must be a JSON object")
+
+    raw_agent_type = require_string(request, "agent_type")
+    cwd = require_string(request, "cwd")
+    prompt = require_string(request, "prompt")
+    model = optional_string(request, "model")
+    effort = optional_string(request, "effort")
+    auto_approve = request.get("auto_approve", False)
+    disallowed_tools = optional_string_list(request, "disallowed_tools")
+    allowed_tools = optional_string_list(request, "allowed_tools")
+
+    if not isinstance(auto_approve, bool):
+        raise ValueError("auto_approve must be a boolean")
+
     try:
         agent_type = AgentType(raw_agent_type)
         shell = AgentShell(agent_type=agent_type)
     except(TypeError, ValueError):
         raise ValueError(f"unsupported agent type: {raw_agent_type}")
 
-    saw_result = False 
-    saw_error = False 
+    saw_result = False
+    saw_error = False
+    last_result_failed = False
 
-    async for event in shell.stream(cwd=request["cwd"], prompt=request["prompt"]):
+    warnings.simplefilter("always")
+    warnings.showwarning = emit_warning
+
+    async for event in shell.stream(
+        cwd=cwd,
+        prompt=prompt,
+        model=model,
+        effort=effort,
+        auto_approve=auto_approve,
+        disallowed_tools=disallowed_tools,
+        allowed_tools=allowed_tools,
+    ):
         emit({
             "kind": "event",
             "event": asdict(event),
@@ -29,10 +57,11 @@ async def main() -> int:
 
         if event.type == "result":
             saw_result = True
+            last_result_failed = event.content != "ok"
         elif event.type == "error":
-            saw_error = True 
+            saw_error = True
 
-    if saw_error:
+    if saw_error or last_result_failed:
         return 1
 
     if not saw_result:
@@ -45,6 +74,45 @@ def emit(message: dict[str, object]) -> None:
     sys.stdout.write(payload + "\n")
     sys.stdout.flush()
 
+def emit_warning(message: Warning, *_args: object, **_kwargs: object) -> None:
+    emit({
+        "kind": "warning",
+        "message": str(message),
+    })
+
+def require_string(request: dict[str, object], key:str) -> str:
+    value = request.get(key)
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be a non-empty string")
+
+    return value
+
+def optional_string(request: dict[str, object], key:str) -> str | None:
+    value = request.get(key)
+
+    if value is None:
+        return None
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be a non-empty string when provided")
+
+    return value
+
+def optional_string_list(request: dict[str, object], key:str) -> list[str] | None:
+    value = request.get(key)
+
+    if value is None:
+        return None
+
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{key} must be a non-empty list when provided")
+
+    if not all(isinstance(item,str) and item.strip() for item in value):
+        raise ValueError(f"{key} must contain only non-empty strings")
+
+    return value
+
 async def run() -> int:
     try:
         return await main()
@@ -53,9 +121,9 @@ async def run() -> int:
             "kind": "fatal",
             "message": str(error),
         })
-        return 1 
+        return 1
 
-if __name__ == "__main__": 
+if __name__ == "__main__":
     raise SystemExit(asyncio.run(run()))
 
 

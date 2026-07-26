@@ -1,5 +1,9 @@
 #!/bin/sh
 
+if [ -n "$FAKE_CODEX_ARGS_FILE" ]; then
+   printf '%s\n' "$@" > "$FAKE_CODEX_ARGS_FILE"
+fi
+
 echo '{"type":"thread.started","thread_id":"test-session"}'
 echo '{"type":"item.completed","item":{"type":"agent_message","text":"test response"}}'
 
