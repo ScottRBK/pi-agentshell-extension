@@ -8,6 +8,9 @@ import { getSupportedAgentTypes, runAgentShell } from "./runner.ts";
 export default async function subagentsExtension(
     pi: ExtensionAPI,
 ): Promise<void> {
+    if (process.env.PI_AGENT_SHELL_CHILD === "1") {
+        return;
+    }
     const agentTypes = await getSupportedAgentTypes() ;
 
     pi.registerTool({

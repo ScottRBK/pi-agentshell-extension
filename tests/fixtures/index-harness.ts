@@ -33,27 +33,27 @@ interface CapturedTool {
 }
 
 export default async function indexHarness(): Promise<void> {
-  const tools: CapturedTool[] = [];
+    const tools: CapturedTool[] = [];
 
-  const fakePi = {
-    registerTool(tool: CapturedTool) {
-      tools.push(tool);
-    },
-  } as unknown as ExtensionAPI;
+    const fakePi = {
+        registerTool(tool: CapturedTool) {
+          tools.push(tool);
+        },
+    } as unknown as ExtensionAPI;
 
-  await subagentsExtension(fakePi);
+    await subagentsExtension(fakePi);
 
-  assert.equal(tools.length, 1);
+    assert.equal(tools.length, 1);
 
-  const tool = tools[0];
-  assert.ok(tool);
-  assert.equal(tool.name, "subagent");
-  assert.deepEqual(tool.parameters.required, ["agent_type", "prompt"]);
+    const tool = tools[0];
+    assert.ok(tool);
+    assert.equal(tool.name, "subagent");
+    assert.deepEqual(tool.parameters.required, ["agent_type", "prompt"]);
 
-  const previousPath = process.env.PATH;
-  process.env.PATH = FAKE_BIN;
+    const previousPath = process.env.PATH;
+    process.env.PATH = FAKE_BIN;
 
-  try {
+    try {
     const result = await tool.execute(
       "index-test",
       {
@@ -81,13 +81,34 @@ export default async function indexHarness(): Promise<void> {
     assert.ok(agentTypes.length > 0);
     assert.ok(agentTypes.includes("codex"));
     assert.equal(new Set(agentTypes).size, agentTypes.length);
-  } finally {
-    if (previousPath === undefined) {
-      delete process.env.PATH;
-    } else {
-      process.env.PATH = previousPath;
+    } finally {
+        if (previousPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = previousPath;
+        }
     }
-  }
 
-  process.stderr.write("INDEX_HARNESS_OK\n");
+    const childTools: CapturedTool[] = [];
+    const childPi = {
+        registerTool(tool: CapturedTool) {
+            childTools.push(tool);
+        },
+    } as unknown as ExtensionAPI;
+
+    const previousChildMarker = process.env.PI_AGENT_SHELL_CHILD;
+    process.env.PI_AGENT_SHELL_CHILD = "1";
+
+    try {
+        await subagentsExtension(childPi);
+        assert.deepEqual(childTools, []);
+    } finally {
+        if (previousChildMarker === undefined) {
+            delete process.env.PI_AGENT_SHELL_CHILD;
+        } else {
+            process.env.PI_AGENT_SHELL_CHILD = previousChildMarker;
+        }
+    }
+
+    process.stderr.write("INDEX_HARNESS_OK\n");
 }
