@@ -79,7 +79,12 @@ export function isAgentShellRuntimeInstalled(): boolean {
 
 async function invokeWorker(
   request: object,
+  signal?: AbortSignal,
 ): Promise<WorkerProcessResult> {
+  if (signal?.aborted) {
+    throw new Error("aborted");
+  }
+
   const child = spawn(
     PYTHON,
     ["-I", "-u", WORKER],
@@ -106,7 +111,7 @@ async function invokeWorker(
     stderr += chunk;
   });
 
-  const exitCode = await new Promise<number | null>((resolve, reject) => {
+  const exitCodePromise = new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code) => resolve(code));
 
@@ -114,6 +119,28 @@ async function invokeWorker(
     child.stdin.on("error", () => {});
     child.stdin.end(JSON.stringify(request));
   });
+
+  const abortWorker = () => {
+    child.kill("SIGINT");
+  };
+
+  if (signal?.aborted) {
+    abortWorker();
+  } else {
+    signal?.addEventListener("abort", abortWorker, { once: true });
+  }
+
+  let exitCode: number | null;
+
+  try {
+    exitCode = await exitCodePromise;
+  } finally {
+    signal?.removeEventListener("abort", abortWorker);
+  }
+
+  if (signal?.aborted) {
+    throw new Error("aborted");
+  }
 
   return {
     exitCode,
@@ -161,8 +188,9 @@ export async function getSupportedAgentTypes(): Promise<string[]> {
 
 export async function runAgentShell(
   request: AgentRequest,
+  signal?: AbortSignal,
 ): Promise<RunResult> {
-  const { exitCode, stdout, stderr } = await invokeWorker(request);
+  const { exitCode, stdout, stderr } = await invokeWorker(request, signal);
 
   const output: string[] = [];
   let status: RunDetails["status"] | undefined;

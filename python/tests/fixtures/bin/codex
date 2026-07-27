@@ -8,6 +8,14 @@ if [ -n "$FAKE_CODEX_CWD_FILE" ]; then
    pwd > "$FAKE_CODEX_CWD_FILE"
 fi
 
+if [ -n "$FAKE_CODEX_STARTED_FILE" ]; then
+   printf 'started\n' > "$FAKE_CODEX_STARTED_FILE"
+fi
+
+if [ -n "$FAKE_CODEX_DELAY_SECONDS" ]; then
+   /bin/sleep "$FAKE_CODEX_DELAY_SECONDS"
+fi
+
 echo '{"type":"thread.started","thread_id":"test-session"}'
 echo '{"type":"item.completed","item":{"type":"agent_message","text":"test response"}}'
 

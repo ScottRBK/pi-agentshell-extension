@@ -44,12 +44,15 @@ async function registerSubagentTool(
       }),
     }),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const result = await runAgentShell({
-        agent_type: params.agent_type,
-        cwd: params.cwd ?? ctx.cwd,
-        prompt: params.prompt,
-      });
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const result = await runAgentShell(
+        {
+          agent_type: params.agent_type,
+          cwd: params.cwd ?? ctx.cwd,
+          prompt: params.prompt,
+        },
+        signal,
+      );
 
       return {
         content: [
