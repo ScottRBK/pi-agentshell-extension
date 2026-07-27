@@ -33,6 +33,12 @@ async function registerSubagentTool(
       agent_type: StringEnum(agentTypes, {
         description: "AgentShell agent type to run",
       }),
+      cwd: Type.Optional(Type.String({
+        minLength: 1,
+        description:
+          "Working directory for the subagent. " +
+          "Defaults to Pi's current working directory.",
+      })),
       prompt: Type.String({
         description: "Task for the subagent",
       }),
@@ -41,7 +47,7 @@ async function registerSubagentTool(
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const result = await runAgentShell({
         agent_type: params.agent_type,
-        cwd: ctx.cwd,
+        cwd: params.cwd ?? ctx.cwd,
         prompt: params.prompt,
       });
 
