@@ -109,6 +109,7 @@ export default async function indexHarness(): Promise<void> {
   process.env.FAKE_CODEX_CWD_FILE = cwdFile;
 
   try {
+    const updates: CapturedResult[] = [];
     const defaultResult = await tool.execute(
       "index-test-default-cwd",
       {
@@ -116,11 +117,26 @@ export default async function indexHarness(): Promise<void> {
         prompt: "Return a test response",
       },
       undefined,
-      undefined,
+      (update: CapturedResult) => updates.push(update),
       { cwd: PYTHON_DIR },
     );
 
     assertSuccessfulResult(defaultResult);
+    assert.deepEqual(updates, [
+      {
+        content: [
+          {
+            type: "text",
+            text: "test response",
+          },
+        ],
+        details: {
+          status: "running",
+          sessionId: "test-session",
+          outputTokens: 0,
+        },
+      },
+    ]);
     assert.equal(
       readFileSync(cwdFile, "utf8").trim(),
       PYTHON_DIR,

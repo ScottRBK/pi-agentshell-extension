@@ -44,7 +44,7 @@ async function registerSubagentTool(
       }),
     }),
 
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const result = await runAgentShell(
         {
           agent_type: params.agent_type,
@@ -52,6 +52,17 @@ async function registerSubagentTool(
           prompt: params.prompt,
         },
         signal,
+        (update) => {
+          onUpdate?.({
+            content: [
+              {
+                type: "text",
+                text: update.output,
+              },
+            ],
+            details: update.details,
+          });
+        },
       );
 
       return {

@@ -60,6 +60,69 @@ test("runs the worker and returns its result", { timeout: 5_000 }, async () => {
     }
 });
 
+test("streams output before the worker exits", { timeout: 5_000 }, async () => {
+    const previousPath = process.env.PATH;
+    const previousResultDelay = process.env.FAKE_CODEX_RESULT_DELAY_SECONDS;
+
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_CODEX_RESULT_DELAY_SECONDS = "1";
+
+    const updates: unknown[] = [];
+    let resolveFirstUpdate: (() => void) | undefined;
+
+    const firstUpdate = new Promise<void>((resolve) => {
+        resolveFirstUpdate = resolve;
+    });
+
+    try {
+        const execution = runAgentShell(
+            {
+                agent_type: "codex",
+                cwd: PYTHON_DIR,
+                prompt: "Return a streamed test response",
+            },
+            undefined,
+            (update: unknown) => {
+                updates.push(update);
+                resolveFirstUpdate?.();
+            },
+        );
+
+        const firstOutcome = await Promise.race([
+            firstUpdate.then(() => "update"),
+            execution.then(() => "result"),
+        ]);
+
+        assert.equal(firstOutcome, "update");
+        assert.deepEqual(updates, [
+            {
+                output: "test response",
+                details: {
+                    status: "running",
+                    sessionId: "test-session",
+                    outputTokens: 0,
+                },
+            },
+        ]);
+
+        const result = await execution;
+        assert.equal(result.output, "test response");
+        assert.equal(result.details.status, "ok");
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousResultDelay === undefined) {
+            delete process.env.FAKE_CODEX_RESULT_DELAY_SECONDS;
+        } else {
+            process.env.FAKE_CODEX_RESULT_DELAY_SECONDS = previousResultDelay;
+        }
+    }
+});
+
 test("aborts a running AgentShell worker", { timeout: 10_000 }, async () => {
     const temporaryDirectory = mkdtempSync(
         join(tmpdir(), "pi-agentshell-cancel-"),

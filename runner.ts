@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const EXTENSION_DIRECTORY = dirname(fileURLToPath(import.meta.url));
@@ -31,7 +32,7 @@ export interface AgentRequest {
 }
 
 export interface RunDetails {
-  status: "ok" | "error";
+  status: "running" | "ok" | "error";
   sessionId?: string;
   outputTokens: number;
 }
@@ -40,6 +41,8 @@ export interface RunResult {
   output: string;
   details: RunDetails;
 }
+
+export type RunUpdate = RunResult;
 
 interface AgentEvent {
   type: string;
@@ -64,6 +67,8 @@ interface AgentTypesMessage {
   agent_types?: unknown;
 }
 
+type WorkerLineHandler = (line: string) => void;
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -80,6 +85,7 @@ export function isAgentShellRuntimeInstalled(): boolean {
 async function invokeWorker(
   request: object,
   signal?: AbortSignal,
+  onLine?: WorkerLineHandler,
 ): Promise<WorkerProcessResult> {
   if (signal?.aborted) {
     throw new Error("aborted");
@@ -111,6 +117,25 @@ async function invokeWorker(
     stderr += chunk;
   });
 
+  let lineError: unknown;
+  let hasLineError = false;
+  const stdoutLines = onLine === undefined
+    ? undefined
+    : createInterface({ input: child.stdout, crlfDelay: Infinity });
+
+  stdoutLines?.on("line", (line) => {
+    if (hasLineError || onLine === undefined) {
+      return;
+    }
+
+    try {
+      onLine(line);
+    } catch (error) {
+      lineError = error;
+      hasLineError = true;
+    }
+  });
+
   const exitCodePromise = new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (code) => resolve(code));
@@ -135,11 +160,16 @@ async function invokeWorker(
   try {
     exitCode = await exitCodePromise;
   } finally {
+    stdoutLines?.close();
     signal?.removeEventListener("abort", abortWorker);
   }
 
   if (signal?.aborted) {
     throw new Error("aborted");
+  }
+
+  if (hasLineError) {
+    throw lineError;
   }
 
   return {
@@ -189,17 +219,16 @@ export async function getSupportedAgentTypes(): Promise<string[]> {
 export async function runAgentShell(
   request: AgentRequest,
   signal?: AbortSignal,
+  onUpdate?: (update: RunUpdate) => void,
 ): Promise<RunResult> {
-  const { exitCode, stdout, stderr } = await invokeWorker(request, signal);
-
   const output: string[] = [];
-  let status: RunDetails["status"] | undefined;
+  let status: "ok" | "error" | undefined;
   let sessionId: string | undefined;
   let outputTokens = 0;
 
-  for (const line of stdout.split(/\r?\n/)) {
+  const handleLine = (line: string) => {
     if (!line.trim()) {
-      continue;
+      return;
     }
 
     const message = JSON.parse(line) as WorkerMessage;
@@ -212,10 +241,6 @@ export async function runAgentShell(
 
     const event = message.event;
 
-    if (event.type === "text") {
-      output.push(event.content);
-    }
-
     if (event.session_id) {
       sessionId = event.session_id;
     }
@@ -224,7 +249,25 @@ export async function runAgentShell(
       status = event.content === "ok" ? "ok" : "error";
       outputTokens = event.output_tokens ?? 0;
     }
-  }
+
+    if (event.type === "text") {
+      output.push(event.content);
+      onUpdate?.({
+        output: output.join("\n"),
+        details: {
+          status: "running",
+          sessionId,
+          outputTokens: 0,
+        },
+      });
+    }
+  };
+
+  const { exitCode, stderr } = await invokeWorker(
+    request,
+    signal,
+    handleLine,
+  );
 
   if (exitCode !== 0) {
     const diagnostic = stderr.trim();
