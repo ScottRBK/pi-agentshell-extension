@@ -29,6 +29,22 @@ interface CapturedResult {
   };
 }
 
+interface CapturedCallArguments {
+  agent_type: string;
+  prompt: string;
+  model?: string;
+  effort?: string;
+}
+
+interface CapturedTheme {
+  bold(text: string): string;
+  fg(color: string, text: string): string;
+}
+
+interface CapturedComponent {
+  render(width: number): string[];
+}
+
 interface CapturedTool {
   name: string;
   parameters: {
@@ -70,6 +86,11 @@ interface CapturedTool {
     };
   };
   execute: (...args: any[]) => Promise<CapturedResult>;
+  renderCall?: (
+    args: CapturedCallArguments,
+    theme: CapturedTheme,
+    context: unknown,
+  ) => CapturedComponent;
 }
 
 async function waitForFile(path: string): Promise<void> {
@@ -146,6 +167,39 @@ export default async function indexHarness(): Promise<void> {
   assert.ok(agentTypes.length > 0);
   assert.ok(agentTypes.includes("codex"));
   assert.equal(new Set(agentTypes).size, agentTypes.length);
+
+  const renderCall = tool.renderCall;
+  assert.ok(renderCall);
+
+  const theme: CapturedTheme = {
+    bold: (text) => text,
+    fg: (_color, text) => text,
+  };
+
+  assert.deepEqual(
+    renderCall(
+      {
+        agent_type: "codex",
+        prompt: "Review this project",
+      },
+      theme,
+      {},
+    ).render(100).map((line) => line.trimEnd()),
+    ["Subagent codex"],
+  );
+  assert.deepEqual(
+    renderCall(
+      {
+        agent_type: "codex",
+        prompt: "Review this project",
+        model: "test-model",
+        effort: "high",
+      },
+      theme,
+      {},
+    ).render(100).map((line) => line.trimEnd()),
+    ["Subagent codex · model: test-model · effort: high"],
+  );
 
   const temporaryDirectory = mkdtempSync(
     join(tmpdir(), "pi-subagent-cwd-"),

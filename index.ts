@@ -1,5 +1,6 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
@@ -82,6 +83,22 @@ async function registerSubagentTool(
         },
       )),
     }),
+
+    renderCall(args, theme) {
+      let text =
+        theme.fg("toolTitle", theme.bold("Subagent ")) +
+        theme.fg("accent", args.agent_type);
+
+      if (args.model) {
+        text += theme.fg("muted", ` · model: ${args.model}`);
+      }
+
+      if (args.effort) {
+        text += theme.fg("muted", ` · effort: ${args.effort}`);
+      }
+
+      return new Text(text, 0, 0);
+    },
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const result = await runAgentShell(
