@@ -51,6 +51,7 @@ test("runs the worker and returns its result", { timeout: 5_000 }, async () => {
         assert.equal(result.details.status, "ok");
         assert.equal(result.details.sessionId, "test-session");
         assert.equal(result.details.outputTokens, 7);
+        assert.deepEqual(result.details.warnings, []);
     } finally {
         if (previousPath === undefined) {
             delete process.env.PATH;
@@ -101,6 +102,7 @@ test("streams output before the worker exits", { timeout: 5_000 }, async () => {
                     status: "running",
                     sessionId: "test-session",
                     outputTokens: 0,
+                    warnings: [],
                 },
             },
         ]);

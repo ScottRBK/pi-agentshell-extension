@@ -46,6 +46,13 @@ The tool accepts the following parameters:
 | `agent_type` | Yes | AgentShell agent type, such as `claude_code` or `codex`. |
 | `prompt` | Yes | Task given to the subagent. |
 | `cwd` | No | Working directory; defaults to Pi's current working directory. |
+| `model` | No | Model identifier passed to AgentShell. |
+| `effort` | No | Reasoning effort; supported values depend on the agent. |
+| `auto_approve` | No | Allows automatic tool approval; defaults to `false`. |
+| `allowed_tools` | No | Tool allow-list; support varies by agent. |
+| `disallowed_tools` | No | Tool deny-list; support varies by agent. |
+
+AgentShell warnings are included in the tool result when an agent cannot enforce a control.
 
 ## Safety and Limitations
 

@@ -20,6 +20,16 @@ function setupCommand(): string {
   ].join(" ");
 }
 
+function formatRunOutput(output: string, warnings: string[]): string {
+  const warningOutput = warnings
+    .map((warning) => `Warning: ${warning}`)
+    .join("\n");
+
+  return [warningOutput, output]
+    .filter((part) => part.length > 0)
+    .join("\n\n");
+}
+
 async function registerSubagentTool(
   pi: ExtensionAPI,
 ): Promise<void> {
@@ -42,6 +52,35 @@ async function registerSubagentTool(
       prompt: Type.String({
         description: "Task for the subagent",
       }),
+      model: Type.Optional(Type.String({
+        minLength: 1,
+        description: "Model identifier passed to AgentShell",
+      })),
+      effort: Type.Optional(Type.String({
+        minLength: 1,
+        description: "Reasoning effort passed to AgentShell",
+      })),
+      auto_approve: Type.Optional(Type.Boolean({
+        description:
+          "Allow the subagent to approve tool use automatically. " +
+          "Defaults to false.",
+      })),
+      allowed_tools: Type.Optional(Type.Array(
+        Type.String({ minLength: 1 }),
+        {
+          minItems: 1,
+          description:
+            "Tool names the subagent may use, when supported",
+        },
+      )),
+      disallowed_tools: Type.Optional(Type.Array(
+        Type.String({ minLength: 1 }),
+        {
+          minItems: 1,
+          description:
+            "Tool names the subagent must not use, when supported",
+        },
+      )),
     }),
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -50,6 +89,11 @@ async function registerSubagentTool(
           agent_type: params.agent_type,
           cwd: params.cwd ?? ctx.cwd,
           prompt: params.prompt,
+          model: params.model,
+          effort: params.effort,
+          auto_approve: params.auto_approve,
+          allowed_tools: params.allowed_tools,
+          disallowed_tools: params.disallowed_tools,
         },
         signal,
         (update) => {
@@ -57,7 +101,10 @@ async function registerSubagentTool(
             content: [
               {
                 type: "text",
-                text: update.output,
+                text: formatRunOutput(
+                  update.output,
+                  update.details.warnings,
+                ),
               },
             ],
             details: update.details,
@@ -69,7 +116,10 @@ async function registerSubagentTool(
         content: [
           {
             type: "text",
-            text: result.output,
+            text: formatRunOutput(
+              result.output,
+              result.details.warnings,
+            ),
           },
         ],
         details: result.details,

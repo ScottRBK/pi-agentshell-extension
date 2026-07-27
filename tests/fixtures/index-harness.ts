@@ -25,6 +25,7 @@ interface CapturedResult {
     status: string;
     sessionId?: string;
     outputTokens: number;
+    warnings: string[];
   };
 }
 
@@ -38,6 +39,33 @@ interface CapturedTool {
       };
       cwd?: {
         type?: string;
+      };
+      model?: {
+        type?: string;
+        minLength?: number;
+      };
+      effort?: {
+        type?: string;
+        minLength?: number;
+      };
+      auto_approve?: {
+        type?: string;
+      };
+      allowed_tools?: {
+        type?: string;
+        minItems?: number;
+        items?: {
+          type?: string;
+          minLength?: number;
+        };
+      };
+      disallowed_tools?: {
+        type?: string;
+        minItems?: number;
+        items?: {
+          type?: string;
+          minLength?: number;
+        };
       };
     };
   };
@@ -66,6 +94,7 @@ function assertSuccessfulResult(result: CapturedResult): void {
   assert.equal(result.details.status, "ok");
   assert.equal(result.details.sessionId, "test-session");
   assert.equal(result.details.outputTokens, 7);
+  assert.deepEqual(result.details.warnings, []);
 }
 
 export default async function indexHarness(): Promise<void> {
@@ -86,6 +115,31 @@ export default async function indexHarness(): Promise<void> {
   assert.equal(tool.name, "subagent");
   assert.deepEqual(tool.parameters.required, ["agent_type", "prompt"]);
   assert.equal(tool.parameters.properties?.cwd?.type, "string");
+  assert.equal(tool.parameters.properties?.model?.type, "string");
+  assert.equal(tool.parameters.properties?.model?.minLength, 1);
+  assert.equal(tool.parameters.properties?.effort?.type, "string");
+  assert.equal(tool.parameters.properties?.effort?.minLength, 1);
+  assert.equal(tool.parameters.properties?.auto_approve?.type, "boolean");
+  assert.equal(tool.parameters.properties?.allowed_tools?.type, "array");
+  assert.equal(tool.parameters.properties?.allowed_tools?.minItems, 1);
+  assert.equal(
+    tool.parameters.properties?.allowed_tools?.items?.type,
+    "string",
+  );
+  assert.equal(
+    tool.parameters.properties?.allowed_tools?.items?.minLength,
+    1,
+  );
+  assert.equal(tool.parameters.properties?.disallowed_tools?.type, "array");
+  assert.equal(tool.parameters.properties?.disallowed_tools?.minItems, 1);
+  assert.equal(
+    tool.parameters.properties?.disallowed_tools?.items?.type,
+    "string",
+  );
+  assert.equal(
+    tool.parameters.properties?.disallowed_tools?.items?.minLength,
+    1,
+  );
 
   const agentTypes = tool.parameters.properties?.agent_type?.enum;
   assert.ok(agentTypes);
@@ -96,16 +150,19 @@ export default async function indexHarness(): Promise<void> {
   const temporaryDirectory = mkdtempSync(
     join(tmpdir(), "pi-subagent-cwd-"),
   );
+  const argumentsFile = join(temporaryDirectory, "arguments");
   const cwdFile = join(temporaryDirectory, "cwd");
   const startedFile = join(temporaryDirectory, "started");
   const overriddenCwd = join(temporaryDirectory, "overridden-cwd");
   mkdirSync(overriddenCwd);
 
   const previousPath = process.env.PATH;
+  const previousArgumentsFile = process.env.FAKE_CODEX_ARGS_FILE;
   const previousCwdFile = process.env.FAKE_CODEX_CWD_FILE;
   const previousStartedFile = process.env.FAKE_CODEX_STARTED_FILE;
   const previousDelay = process.env.FAKE_CODEX_DELAY_SECONDS;
   process.env.PATH = FAKE_BIN;
+  process.env.FAKE_CODEX_ARGS_FILE = argumentsFile;
   process.env.FAKE_CODEX_CWD_FILE = cwdFile;
 
   try {
@@ -134,6 +191,7 @@ export default async function indexHarness(): Promise<void> {
           status: "running",
           sessionId: "test-session",
           outputTokens: 0,
+          warnings: [],
         },
       },
     ]);
@@ -159,6 +217,47 @@ export default async function indexHarness(): Promise<void> {
       readFileSync(cwdFile, "utf8").trim(),
       overriddenCwd,
     );
+
+    const controlledResult = await tool.execute(
+      "index-test-controls",
+      {
+        agent_type: "codex",
+        model: "test-model",
+        effort: "high",
+        auto_approve: true,
+        allowed_tools: ["Read"],
+        disallowed_tools: ["web_search"],
+        prompt: "Return a test response",
+      },
+      undefined,
+      undefined,
+      { cwd: PYTHON_DIR },
+    );
+
+    const warning =
+      "Codex CLI has no per-call allowed_tools mechanism; ignoring";
+
+    assert.deepEqual(controlledResult.content, [
+      {
+        type: "text",
+        text: `Warning: ${warning}\n\ntest response`,
+      },
+    ]);
+    assert.equal(controlledResult.details.status, "ok");
+    assert.deepEqual(controlledResult.details.warnings, [warning]);
+
+    const agentArguments = readFileSync(argumentsFile, "utf8")
+      .split(/\r?\n/);
+    const modelIndex = agentArguments.indexOf("--model");
+    assert.notEqual(modelIndex, -1);
+    assert.equal(agentArguments[modelIndex + 1], "test-model");
+    assert.ok(agentArguments.includes('model_reasoning_effort="high"'));
+    assert.ok(
+      agentArguments.includes(
+        "--dangerously-bypass-approvals-and-sandbox",
+      ),
+    );
+    assert.ok(agentArguments.includes('web_search="disabled"'));
 
     process.env.FAKE_CODEX_STARTED_FILE = startedFile;
     process.env.FAKE_CODEX_DELAY_SECONDS = "2";
@@ -186,6 +285,12 @@ export default async function indexHarness(): Promise<void> {
       delete process.env.PATH;
     } else {
       process.env.PATH = previousPath;
+    }
+
+    if (previousArgumentsFile === undefined) {
+      delete process.env.FAKE_CODEX_ARGS_FILE;
+    } else {
+      process.env.FAKE_CODEX_ARGS_FILE = previousArgumentsFile;
     }
 
     if (previousCwdFile === undefined) {

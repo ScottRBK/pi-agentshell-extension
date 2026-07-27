@@ -35,6 +35,7 @@ export interface RunDetails {
   status: "running" | "ok" | "error";
   sessionId?: string;
   outputTokens: number;
+  warnings: string[];
 }
 
 export interface RunResult {
@@ -54,6 +55,7 @@ interface AgentEvent {
 interface WorkerMessage {
   kind: string;
   event?: AgentEvent;
+  message?: unknown;
 }
 
 interface WorkerProcessResult {
@@ -222,6 +224,7 @@ export async function runAgentShell(
   onUpdate?: (update: RunUpdate) => void,
 ): Promise<RunResult> {
   const output: string[] = [];
+  const warnings: string[] = [];
   let status: "ok" | "error" | undefined;
   let sessionId: string | undefined;
   let outputTokens = 0;
@@ -232,6 +235,15 @@ export async function runAgentShell(
     }
 
     const message = JSON.parse(line) as WorkerMessage;
+
+    if (message.kind === "warning") {
+      if (!isNonEmptyString(message.message)) {
+        throw new Error("AgentShell worker emitted an invalid warning");
+      }
+
+      warnings.push(message.message);
+      return;
+    }
 
     if (message.kind !== "event" || message.event === undefined) {
       throw new Error(
@@ -258,6 +270,7 @@ export async function runAgentShell(
           status: "running",
           sessionId,
           outputTokens: 0,
+          warnings: [...warnings],
         },
       });
     }
@@ -288,6 +301,7 @@ export async function runAgentShell(
       status,
       sessionId,
       outputTokens,
+      warnings,
     },
   };
 }
