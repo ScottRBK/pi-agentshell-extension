@@ -4,7 +4,7 @@ import json
 import subprocess
 import sys
 import unittest
-from agent_shell.models.agent import AgentType 
+from agent_shell.models.agent import AgentType
 
 from pathlib import Path
 

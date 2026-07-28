@@ -1,0 +1,70 @@
+{
+  "name": "@scottrbk/pi-agentshell-extension",
+  "version": "1.0.0",
+  "description": "Delegate Pi tasks to other coding agents through AgentShell",
+  "type": "module",
+  "license": "MIT",
+  "author": "Scott",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ScottRBK/pi-agentshell-extension.git"
+  },
+  "homepage": "https://github.com/ScottRBK/pi-agentshell-extension#readme",
+  "bugs": {
+    "url": "https://github.com/ScottRBK/pi-agentshell-extension/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "agentshell",
+    "subagent"
+  ],
+  "files": [
+    "config.ts",
+    "docs/assets/architecture.png",
+    "extensions/agentshell.ts",
+    "index.ts",
+    "limits.ts",
+    "python/pyproject.toml",
+    "python/uv.lock",
+    "python/worker.py",
+    "runner.ts"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "lint": "bash scripts/lint.sh",
+    "test": "node --test tests/*.test.ts",
+    "test:python": "cd python && uv run tests/test_worker.py"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/agentshell.ts"
+    ]
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

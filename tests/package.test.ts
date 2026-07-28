@@ -12,6 +12,71 @@ import { fileURLToPath } from "node:url";
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const HARNESS = join(ROOT, "tests", "fixtures", "package-harness.ts");
 
+const EXPECTED_PACKAGE_FILES = [
+  "LICENSE",
+  "README.md",
+  "config.ts",
+  "docs/assets/architecture.png",
+  "extensions/agentshell.ts",
+  "index.ts",
+  "limits.ts",
+  "package.json",
+  "python/pyproject.toml",
+  "python/uv.lock",
+  "python/worker.py",
+  "runner.ts",
+];
+
+test("runs dependency-free source linting", () => {
+  const linted = spawnSync(
+    "npm",
+    ["run", "lint", "--silent"],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: 30_000,
+    },
+  );
+
+  assert.equal(linted.error, undefined, linted.error?.message);
+  assert.equal(
+    linted.status,
+    0,
+    `stdout:\n${linted.stdout}\nstderr:\n${linted.stderr}`,
+  );
+});
+
+test("packs the complete AgentShell runtime for npm", () => {
+  const packed = spawnSync(
+    "npm",
+    ["pack", "--dry-run", "--json"],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: 10_000,
+    },
+  );
+
+  assert.equal(packed.error, undefined, packed.error?.message);
+  assert.equal(
+    packed.status,
+    0,
+    `stdout:\n${packed.stdout}\nstderr:\n${packed.stderr}`,
+  );
+
+  const [manifest] = JSON.parse(packed.stdout) as Array<{
+    name: string;
+    version: string;
+    files: Array<{ path: string }>;
+  }>;
+  assert.ok(manifest);
+  assert.equal(manifest.name, "@scottrbk/pi-agentshell-extension");
+  assert.equal(manifest.version, "1.0.0");
+
+  const files = manifest.files.map(({ path }) => path).sort();
+  assert.deepEqual(files, EXPECTED_PACKAGE_FILES);
+});
+
 test("loads the extension when installed as a Pi package", {
   timeout: 15_000,
 }, () => {

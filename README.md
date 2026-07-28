@@ -17,6 +17,12 @@ harnesses, including Pi, through [AgentShell](https://github.com/ScottRBK/agent-
 ## Installation
 
 ```bash
+pi install npm:@scottrbk/pi-agentshell-extension
+```
+
+To install the latest source from GitHub instead:
+
+```bash
 pi install git:github.com/ScottRBK/pi-agentshell-extension
 ```
 
@@ -108,7 +114,7 @@ Overrides may be partial. Values are positive whole numbers in bytes. `maxOutput
 ## Removal
 
 ```bash
-pi remove git:github.com/ScottRBK/pi-agentshell-extension
+pi remove npm:@scottrbk/pi-agentshell-extension
 ```
 
 ## License
