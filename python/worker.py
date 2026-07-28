@@ -31,6 +31,7 @@ async def main() -> int:
     prompt = require_string(request, "prompt")
     model = optional_string(request, "model")
     effort = optional_string(request, "effort")
+    session_id = optional_string(request, "session_id")
     auto_approve = request.get("auto_approve", False)
     disallowed_tools = optional_string_list(request, "disallowed_tools")
     allowed_tools = optional_string_list(request, "allowed_tools")
@@ -59,6 +60,7 @@ async def main() -> int:
         auto_approve=auto_approve,
         disallowed_tools=disallowed_tools,
         allowed_tools=allowed_tools,
+        session_id=session_id,
     ):
         emit({
             "kind": "event",

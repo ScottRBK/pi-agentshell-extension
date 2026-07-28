@@ -48,11 +48,29 @@ The tool accepts the following parameters:
 | `cwd` | No | Working directory; defaults to Pi's current working directory. |
 | `model` | No | Model identifier passed to AgentShell. |
 | `effort` | No | Reasoning effort; supported values depend on the agent. |
+| `session_id` | No | Session ID of an earlier call, to continue that conversation. |
 | `auto_approve` | No | Allows automatic tool approval; defaults to `false`. |
 | `allowed_tools` | No | Tool allow-list; support varies by agent. |
 | `disallowed_tools` | No | Tool deny-list; support varies by agent. |
 
 AgentShell warnings are included in the tool result when an agent cannot enforce a control.
+
+### Resuming a Subagent
+
+Every successful call ends its text output with the subagent's session ID:
+
+```
+Reviewed the project and found two bugs.
+
+Session ID: 0199f0c1-9a2b-7c3d-8e4f-5a6b7c8d9e0f
+```
+
+Passing that value back as `session_id` continues the same subagent conversation, so the
+subagent keeps the context of its earlier work:
+
+> Ask Codex to fix the bugs it found, resuming session 0199f0c1-9a2b-7c3d-8e4f-5a6b7c8d9e0f.
+
+The subagent harness owns the stored session; this extension only forwards the ID.
 
 ## Output Limits
 

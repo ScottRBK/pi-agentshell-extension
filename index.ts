@@ -13,6 +13,7 @@ import {
   getSupportedAgentTypes,
   isAgentShellRuntimeInstalled,
   runAgentShell,
+  type RunResult,
 } from "./runner.ts";
 
 const UV_INSTALL_URL =
@@ -26,12 +27,14 @@ function setupCommand(): string {
   ].join(" ");
 }
 
-function formatRunOutput(output: string, warnings: string[]): string {
-  const warningOutput = warnings
+function formatRunOutput(result: RunResult): string {
+  const warningOutput = result.details.warnings
     .map((warning) => `Warning: ${warning}`)
     .join("\n");
+  const sessionId = result.details.sessionId;
+  const sessionOutput = sessionId ? `Session ID: ${sessionId}` : "";
 
-  return [warningOutput, output]
+  return [warningOutput, result.output, sessionOutput]
     .filter((part) => part.length > 0)
     .join("\n\n");
 }
@@ -66,6 +69,12 @@ async function registerSubagentTool(
       effort: Type.Optional(Type.String({
         minLength: 1,
         description: "Reasoning effort passed to AgentShell",
+      })),
+      session_id: Type.Optional(Type.String({
+        minLength: 1,
+        description:
+          "Session ID of an earlier subagent call to resume, " +
+          "as reported by that call.",
       })),
       auto_approve: Type.Optional(Type.Boolean({
         description:
@@ -114,6 +123,7 @@ async function registerSubagentTool(
           prompt: params.prompt,
           model: params.model,
           effort: params.effort,
+          session_id: params.session_id,
           auto_approve: params.auto_approve,
           allowed_tools: params.allowed_tools,
           disallowed_tools: params.disallowed_tools,
@@ -124,10 +134,7 @@ async function registerSubagentTool(
             content: [
               {
                 type: "text",
-                text: formatRunOutput(
-                  update.output,
-                  update.details.warnings,
-                ),
+                text: formatRunOutput(update),
               },
             ],
             details: update.details,
@@ -140,10 +147,7 @@ async function registerSubagentTool(
         content: [
           {
             type: "text",
-            text: formatRunOutput(
-              result.output,
-              result.details.warnings,
-            ),
+            text: formatRunOutput(result),
           },
         ],
         details: result.details,

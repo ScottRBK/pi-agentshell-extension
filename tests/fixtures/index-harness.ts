@@ -64,6 +64,10 @@ interface CapturedTool {
         type?: string;
         minLength?: number;
       };
+      session_id?: {
+        type?: string;
+        minLength?: number;
+      };
       auto_approve?: {
         type?: string;
       };
@@ -109,7 +113,7 @@ function assertSuccessfulResult(result: CapturedResult): void {
   assert.deepEqual(result.content, [
     {
       type: "text",
-      text: "test response",
+      text: "test response\n\nSession ID: test-session",
     },
   ]);
   assert.equal(result.details.status, "ok");
@@ -190,6 +194,8 @@ export default async function indexHarness(): Promise<void> {
   assert.equal(tool.parameters.properties?.model?.minLength, 1);
   assert.equal(tool.parameters.properties?.effort?.type, "string");
   assert.equal(tool.parameters.properties?.effort?.minLength, 1);
+  assert.equal(tool.parameters.properties?.session_id?.type, "string");
+  assert.equal(tool.parameters.properties?.session_id?.minLength, 1);
   assert.equal(tool.parameters.properties?.auto_approve?.type, "boolean");
   assert.equal(tool.parameters.properties?.allowed_tools?.type, "array");
   assert.equal(tool.parameters.properties?.allowed_tools?.minItems, 1);
@@ -288,7 +294,7 @@ export default async function indexHarness(): Promise<void> {
         content: [
           {
             type: "text",
-            text: "test response",
+            text: "test response\n\nSession ID: test-session",
           },
         ],
         details: {
@@ -344,7 +350,9 @@ export default async function indexHarness(): Promise<void> {
     assert.deepEqual(controlledResult.content, [
       {
         type: "text",
-        text: `Warning: ${warning}\n\ntest response`,
+        text:
+          `Warning: ${warning}\n\ntest response` +
+          "\n\nSession ID: test-session",
       },
     ]);
     assert.equal(controlledResult.details.status, "ok");
@@ -362,6 +370,25 @@ export default async function indexHarness(): Promise<void> {
       ),
     );
     assert.ok(agentArguments.includes('web_search="disabled"'));
+
+    const resumedResult = await tool.execute(
+      "index-test-resume",
+      {
+        agent_type: "codex",
+        prompt: "Continue the task",
+        session_id: "existing-session",
+      },
+      undefined,
+      undefined,
+      { cwd: PYTHON_DIR },
+    );
+
+    assert.equal(resumedResult.details.status, "ok");
+
+    const resumedArguments = readFileSync(argumentsFile, "utf8")
+      .split(/\r?\n/);
+    assert.ok(resumedArguments.includes("resume"));
+    assert.ok(resumedArguments.includes("existing-session"));
 
     process.env.FAKE_CODEX_STARTED_FILE = startedFile;
     process.env.FAKE_CODEX_DELAY_SECONDS = "2";

@@ -174,6 +174,36 @@ class WorkerProtocolTest(unittest.TestCase):
            arguments,
        )
 
+    def test_forwards_session_id_to_agent_shell(self) -> None:
+       request = {
+           "agent_type": "codex",
+           "cwd": str(PYTHON_DIR),
+           "prompt": "Continue the task",
+           "session_id": "existing-session",
+       }
+
+       with tempfile.TemporaryDirectory() as temp_directory:
+           arguments_file = Path(temp_directory) / "arguments"
+
+           completed, _messages = self.run_worker(
+               request,
+               extra_env={
+                   "FAKE_CODEX_ARGS_FILE": str(arguments_file),
+               },
+           )
+
+           arguments = arguments_file.read_text(
+               encoding="utf-8",
+           ).splitlines()
+
+       self.assertEqual(
+           completed.returncode,
+           0,
+           f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+       )
+       self.assertIn("resume", arguments)
+       self.assertIn("existing-session", arguments)
+
     def test_rejects_invalid_optional_strings(self) -> None:
        valid_request = {
            "agent_type": "codex",
@@ -181,7 +211,7 @@ class WorkerProtocolTest(unittest.TestCase):
            "prompt": "Do something",
        }
 
-       for field in ("model", "effort"):
+       for field in ("model", "effort", "session_id"):
            for value in (" ", 123):
                with self.subTest(field=field, value=value):
                    request = {

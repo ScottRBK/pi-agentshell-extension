@@ -30,6 +30,7 @@ export interface AgentRequest {
   prompt: string;
   model?: string;
   effort?: string;
+  session_id?: string;
   auto_approve?: boolean;
   allowed_tools?: string[];
   disallowed_tools?: string[];
