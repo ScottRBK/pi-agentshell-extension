@@ -1,0 +1,18 @@
+#!/bin/sh
+
+echo '{"type":"session","id":"pi-failed-session"}'
+
+printf '%s' \
+   '{"type":"message_update",' \
+   '"assistantMessageEvent":{' \
+   '"type":"text_end",' \
+   '"content":"partial pi response"}}'
+printf '\n'
+
+printf '%s' \
+   '{"type":"agent_end","messages":[{' \
+   '"role":"assistant","provider":"test",' \
+   '"model":"test-model","stopReason":"error",' \
+   '"errorMessage":"model unavailable",' \
+   '"usage":{"output":3,"cost":{"total":0}}}]}'
+printf '\n'

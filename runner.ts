@@ -48,6 +48,7 @@ export type RunUpdate = RunResult;
 interface AgentEvent {
   type: string;
   content: string;
+  error?: unknown;
   session_id?: string | null;
   output_tokens?: number;
 }
@@ -73,6 +74,16 @@ type WorkerLineHandler = (line: string) => void;
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function formatFailure(reason: string, output: string[]): string {
+  const partialOutput = output.join("\n");
+
+  if (!partialOutput) {
+    return reason;
+  }
+
+  return [reason, "", "Partial output:", partialOutput].join("\n");
 }
 
 export function isAgentShellRuntimeInstalled(): boolean {
@@ -225,6 +236,7 @@ export async function runAgentShell(
 ): Promise<RunResult> {
   const output: string[] = [];
   const warnings: string[] = [];
+  let failureReason: string | undefined;
   let status: "ok" | "error" | undefined;
   let sessionId: string | undefined;
   let outputTokens = 0;
@@ -245,6 +257,15 @@ export async function runAgentShell(
       return;
     }
 
+    if (message.kind === "fatal") {
+      if (!isNonEmptyString(message.message)) {
+        throw new Error("AgentShell worker emitted an invalid fatal message");
+      }
+
+      failureReason = message.message;
+      return;
+    }
+
     if (message.kind !== "event" || message.event === undefined) {
       throw new Error(
         `AgentShell worker emitted unsupported message: ${message.kind}`,
@@ -257,9 +278,19 @@ export async function runAgentShell(
       sessionId = event.session_id;
     }
 
+    if (event.type === "error" && isNonEmptyString(event.content)) {
+      failureReason = event.content;
+    }
+
     if (event.type === "result") {
       status = event.content === "ok" ? "ok" : "error";
       outputTokens = event.output_tokens ?? 0;
+
+      if (status === "error" && !failureReason) {
+        failureReason = isNonEmptyString(event.error)
+          ? event.error
+          : `${request.agent_type} reported an unsuccessful result`;
+      }
     }
 
     if (event.type === "text") {
@@ -281,6 +312,10 @@ export async function runAgentShell(
     signal,
     handleLine,
   );
+
+  if (failureReason) {
+    throw new Error(formatFailure(failureReason, output));
+  }
 
   if (exitCode !== 0) {
     const diagnostic = stderr.trim();

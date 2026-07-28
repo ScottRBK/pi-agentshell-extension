@@ -61,6 +61,139 @@ test("runs the worker and returns its result", { timeout: 5_000 }, async () => {
     }
 });
 
+test("reports agent failures with partial output", { timeout: 5_000 }, async () => {
+    const previousPath = process.env.PATH;
+    const previousError = process.env.FAKE_CODEX_ERROR;
+
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_CODEX_ERROR = "1";
+
+    try {
+        await assert.rejects(
+            runAgentShell({
+                agent_type: "codex",
+                cwd: PYTHON_DIR,
+                prompt: "Fail after returning partial output",
+            }),
+            {
+                message: [
+                    "fake agent failed",
+                    "",
+                    "Partial output:",
+                    "test response",
+                ].join("\n"),
+            },
+        );
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousError === undefined) {
+            delete process.env.FAKE_CODEX_ERROR;
+        } else {
+            process.env.FAKE_CODEX_ERROR = previousError;
+        }
+    }
+});
+
+test("reports worker fatal messages with partial output", {
+    timeout: 5_000,
+}, async () => {
+    const previousPath = process.env.PATH;
+    const previousNoResult = process.env.FAKE_CODEX_NO_RESULT;
+
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_CODEX_NO_RESULT = "1";
+
+    try {
+        await assert.rejects(
+            runAgentShell({
+                agent_type: "codex",
+                cwd: PYTHON_DIR,
+                prompt: "End without a terminal result",
+            }),
+            {
+                message: [
+                    "agent stream ended without a terminal result",
+                    "",
+                    "Partial output:",
+                    "test response",
+                ].join("\n"),
+            },
+        );
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousNoResult === undefined) {
+            delete process.env.FAKE_CODEX_NO_RESULT;
+        } else {
+            process.env.FAKE_CODEX_NO_RESULT = previousNoResult;
+        }
+    }
+});
+
+test("reports unsuccessful terminal results", { timeout: 5_000 }, async () => {
+    const previousPath = process.env.PATH;
+    process.env.PATH = FAKE_BIN;
+
+    try {
+        await assert.rejects(
+            runAgentShell({
+                agent_type: "claude_code",
+                cwd: PYTHON_DIR,
+                prompt: "Report an unsuccessful result",
+            }),
+            {
+                message: "claude_code reported an unsuccessful result",
+            },
+        );
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+    }
+});
+
+test("reports terminal failure reasons with partial output", {
+    timeout: 5_000,
+}, async () => {
+    const previousPath = process.env.PATH;
+    process.env.PATH = FAKE_BIN;
+
+    try {
+        await assert.rejects(
+            runAgentShell({
+                agent_type: "pi",
+                cwd: PYTHON_DIR,
+                prompt: "Report a failed Pi result",
+            }),
+            {
+                message: [
+                    "model unavailable",
+                    "",
+                    "Partial output:",
+                    "partial pi response",
+                ].join("\n"),
+            },
+        );
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+    }
+});
+
 test("streams output before the worker exits", { timeout: 5_000 }, async () => {
     const previousPath = process.env.PATH;
     const previousResultDelay = process.env.FAKE_CODEX_RESULT_DELAY_SECONDS;
