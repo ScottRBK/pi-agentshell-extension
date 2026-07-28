@@ -1,8 +1,13 @@
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  getAgentDir,
+  type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
+import { loadAgentShellLimits } from "./config.ts";
+import type { AgentShellLimits } from "./limits.ts";
 import {
   AGENT_SHELL_PROJECT_DIRECTORY,
   getSupportedAgentTypes,
@@ -33,8 +38,9 @@ function formatRunOutput(output: string, warnings: string[]): string {
 
 async function registerSubagentTool(
   pi: ExtensionAPI,
+  limits: AgentShellLimits,
 ): Promise<void> {
-  const agentTypes = await getSupportedAgentTypes();
+  const agentTypes = await getSupportedAgentTypes(limits);
 
   pi.registerTool({
     name: "subagent",
@@ -127,6 +133,7 @@ async function registerSubagentTool(
             details: update.details,
           });
         },
+        limits,
       );
 
       return {
@@ -152,8 +159,10 @@ export default async function subagentsExtension(
     return;
   }
 
+  const limits = loadAgentShellLimits(getAgentDir());
+
   if (isAgentShellRuntimeInstalled()) {
-    await registerSubagentTool(pi);
+    await registerSubagentTool(pi, limits);
     return;
   }
 
@@ -238,7 +247,7 @@ export default async function subagentsExtension(
     }
 
     try {
-      await registerSubagentTool(pi);
+      await registerSubagentTool(pi, limits);
       ctx.ui.notify("The subagent tool is ready.", "info");
     } catch (error) {
       const message =

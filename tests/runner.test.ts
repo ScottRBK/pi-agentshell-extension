@@ -1,20 +1,30 @@
 import assert from "node:assert/strict";
 import {
+    chmodSync,
+    copyFileSync,
     existsSync,
+    mkdirSync,
     mkdtempSync,
     rmSync,
+    writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { getSupportedAgentTypes, runAgentShell } from "../runner.ts";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const PYTHON_DIR = join(ROOT, "python");
 const FAKE_BIN = join(PYTHON_DIR, "tests", "fixtures", "bin");
+const GENEROUS_LIMITS = {
+    maxOutputBytes: 1024 * 1024,
+    maxProtocolBytes: 2 * 1024 * 1024,
+    maxMessageBytes: 1024 * 1024,
+    maxStderrBytes: 1024 * 1024,
+};
 
 async function waitForFile(path: string): Promise<void> {
     const deadline = Date.now() + 5_000;
@@ -58,6 +68,200 @@ test("runs the worker and returns its result", { timeout: 5_000 }, async () => {
         } else {
             process.env.PATH = previousPath;
         }
+    }
+});
+
+test("stops and reports truncated output at the output limit", {
+    timeout: 5_000,
+}, async () => {
+    const previousPath = process.env.PATH;
+    const previousResponse = process.env.FAKE_CODEX_RESPONSE;
+
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_CODEX_RESPONSE = "ab🙂cd";
+
+    try {
+        await assert.rejects(
+            runAgentShell(
+                {
+                    agent_type: "codex",
+                    cwd: PYTHON_DIR,
+                    prompt: "Return too much output",
+                },
+                undefined,
+                undefined,
+                {
+                    ...GENEROUS_LIMITS,
+                    maxOutputBytes: 5,
+                },
+            ),
+            {
+                message: [
+                    "AgentShell output exceeded the 5 byte limit. " +
+                        "The agent was stopped.",
+                    "Increase maxOutputBytes in your AgentShell extension " +
+                        "configuration to override it.",
+                    "",
+                    "Partial output (truncated):",
+                    "ab",
+                ].join("\n"),
+            },
+        );
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousResponse === undefined) {
+            delete process.env.FAKE_CODEX_RESPONSE;
+        } else {
+            process.env.FAKE_CODEX_RESPONSE = previousResponse;
+        }
+    }
+});
+
+test("stops when worker protocol exceeds the total limit", {
+    timeout: 5_000,
+}, async () => {
+    const previousPath = process.env.PATH;
+    process.env.PATH = FAKE_BIN;
+
+    try {
+        await assert.rejects(
+            runAgentShell(
+                {
+                    agent_type: "codex",
+                    cwd: PYTHON_DIR,
+                    prompt: "Exceed the protocol limit",
+                },
+                undefined,
+                undefined,
+                {
+                    ...GENEROUS_LIMITS,
+                    maxProtocolBytes: 200,
+                    maxMessageBytes: 150,
+                },
+            ),
+            {
+                message: [
+                    "AgentShell protocol exceeded the 200 byte limit. " +
+                        "The agent was stopped.",
+                    "Increase maxProtocolBytes in your AgentShell extension " +
+                        "configuration to override it.",
+                ].join("\n"),
+            },
+        );
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+    }
+});
+
+test("stops when one worker message exceeds its limit", {
+    timeout: 5_000,
+}, async () => {
+    const previousPath = process.env.PATH;
+    process.env.PATH = FAKE_BIN;
+
+    try {
+        await assert.rejects(
+            runAgentShell(
+                {
+                    agent_type: "codex",
+                    cwd: PYTHON_DIR,
+                    prompt: "Exceed the message limit",
+                },
+                undefined,
+                undefined,
+                {
+                    ...GENEROUS_LIMITS,
+                    maxMessageBytes: 100,
+                },
+            ),
+            {
+                message: [
+                    "AgentShell protocol message exceeded the 100 byte limit. " +
+                        "The agent was stopped.",
+                    "Increase maxMessageBytes in your AgentShell extension " +
+                        "configuration to override it.",
+                ].join("\n"),
+            },
+        );
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+    }
+});
+
+test("stops when worker stderr exceeds its limit", {
+    timeout: 5_000,
+}, async () => {
+    const temporaryExtension = mkdtempSync(
+        join(tmpdir(), "pi-agentshell-stderr-"),
+    );
+    const temporaryBin = join(
+        temporaryExtension,
+        "python",
+        ".venv",
+        "bin",
+    );
+
+    try {
+        mkdirSync(temporaryBin, { recursive: true });
+        copyFileSync(
+            join(ROOT, "runner.ts"),
+            join(temporaryExtension, "runner.ts"),
+        );
+        copyFileSync(
+            join(ROOT, "limits.ts"),
+            join(temporaryExtension, "limits.ts"),
+        );
+
+        const temporaryPython = join(temporaryBin, "python");
+        writeFileSync(
+            temporaryPython,
+            "#!/bin/sh\nprintf 'abcdef' >&2\n",
+            "utf8",
+        );
+        chmodSync(temporaryPython, 0o755);
+
+        const temporaryRunner = await import(
+            pathToFileURL(join(temporaryExtension, "runner.ts")).href
+        );
+
+        await assert.rejects(
+            temporaryRunner.runAgentShell(
+                {
+                    agent_type: "codex",
+                    cwd: PYTHON_DIR,
+                    prompt: "Exceed the stderr limit",
+                },
+                undefined,
+                undefined,
+                {
+                    ...GENEROUS_LIMITS,
+                    maxStderrBytes: 5,
+                },
+            ),
+            {
+                message: [
+                    "AgentShell stderr exceeded the 5 byte limit. " +
+                        "The agent was stopped.",
+                    "Increase maxStderrBytes in your AgentShell extension " +
+                        "configuration to override it.",
+                ].join("\n"),
+            },
+        );
+    } finally {
+        rmSync(temporaryExtension, { recursive: true, force: true });
     }
 });
 

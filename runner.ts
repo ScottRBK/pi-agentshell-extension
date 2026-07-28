@@ -1,8 +1,12 @@
 import { spawn } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+
+import {
+  DEFAULT_AGENT_SHELL_LIMITS,
+  type AgentShellLimits,
+} from "./limits.ts";
 
 const EXTENSION_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 
@@ -76,14 +80,62 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-function formatFailure(reason: string, output: string[]): string {
+function formatFailure(
+  reason: string,
+  output: string[],
+  partialOutputLabel = "Partial output:",
+): string {
   const partialOutput = output.join("\n");
 
   if (!partialOutput) {
     return reason;
   }
 
-  return [reason, "", "Partial output:", partialOutput].join("\n");
+  return [reason, "", partialOutputLabel, partialOutput].join("\n");
+}
+
+function takeUtf8Prefix(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let prefix = "";
+
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character);
+
+    if (bytes + characterBytes > maxBytes) {
+      break;
+    }
+
+    prefix += character;
+    bytes += characterBytes;
+  }
+
+  return prefix;
+}
+
+function formatLimitFailure(
+  subject: string,
+  setting: keyof AgentShellLimits,
+  maxBytes: number,
+): string {
+  return [
+    `AgentShell ${subject} exceeded the ${maxBytes} byte limit. ` +
+      "The agent was stopped.",
+    `Increase ${setting} in your AgentShell extension ` +
+      "configuration to override it.",
+  ].join("\n");
+}
+
+function formatOutputLimitFailure(
+  maxOutputBytes: number,
+  output: string[],
+): string {
+  const reason = formatLimitFailure(
+    "output",
+    "maxOutputBytes",
+    maxOutputBytes,
+  );
+
+  return formatFailure(reason, output, "Partial output (truncated):");
 }
 
 export function isAgentShellRuntimeInstalled(): boolean {
@@ -99,6 +151,7 @@ async function invokeWorker(
   request: object,
   signal?: AbortSignal,
   onLine?: WorkerLineHandler,
+  limits: AgentShellLimits = DEFAULT_AGENT_SHELL_LIMITS,
 ): Promise<WorkerProcessResult> {
   if (signal?.aborted) {
     throw new Error("aborted");
@@ -116,36 +169,132 @@ async function invokeWorker(
     },
   );
 
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-
-  let stdout = "";
-  let stderr = "";
-
-  child.stdout.on("data", (chunk: string) => {
-    stdout += chunk;
-  });
-
-  child.stderr.on("data", (chunk: string) => {
-    stderr += chunk;
-  });
-
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  const pendingLineChunks: Buffer[] = [];
+  let protocolBytes = 0;
+  let stderrBytes = 0;
+  let pendingLineBytes = 0;
   let lineError: unknown;
   let hasLineError = false;
-  const stdoutLines = onLine === undefined
-    ? undefined
-    : createInterface({ input: child.stdout, crlfDelay: Infinity });
 
-  stdoutLines?.on("line", (line) => {
-    if (hasLineError || onLine === undefined) {
+  const stopWorker = (error: unknown) => {
+    if (hasLineError) {
+      return;
+    }
+
+    lineError = error;
+    hasLineError = true;
+    child.kill("SIGINT");
+  };
+
+  const emitLine = () => {
+    const lineBuffer = Buffer.concat(
+      pendingLineChunks,
+      pendingLineBytes,
+    );
+    const contentLength =
+      lineBuffer.at(-1) === 0x0d
+        ? lineBuffer.length - 1
+        : lineBuffer.length;
+
+    pendingLineChunks.length = 0;
+    pendingLineBytes = 0;
+
+    if (onLine === undefined) {
       return;
     }
 
     try {
-      onLine(line);
+      onLine(lineBuffer.toString("utf8", 0, contentLength));
     } catch (error) {
-      lineError = error;
-      hasLineError = true;
+      stopWorker(error);
+    }
+  };
+
+  const processProtocolChunk = (chunk: Buffer) => {
+    let offset = 0;
+
+    while (offset < chunk.length && !hasLineError) {
+      const newline = chunk.indexOf(0x0a, offset);
+      const end = newline === -1 ? chunk.length : newline;
+      const segment = chunk.subarray(offset, end);
+
+      if (
+        pendingLineBytes + segment.length >
+          limits.maxMessageBytes
+      ) {
+        stopWorker(new Error(formatLimitFailure(
+          "protocol message",
+          "maxMessageBytes",
+          limits.maxMessageBytes,
+        )));
+        return;
+      }
+
+      if (segment.length > 0) {
+        pendingLineChunks.push(segment);
+        pendingLineBytes += segment.length;
+      }
+
+      if (newline === -1) {
+        return;
+      }
+
+      emitLine();
+      offset = newline + 1;
+    }
+  };
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    if (hasLineError) {
+      return;
+    }
+
+    const remainingBytes = limits.maxProtocolBytes - protocolBytes;
+    const acceptedBytes = Math.min(chunk.length, remainingBytes);
+
+    if (acceptedBytes > 0) {
+      const acceptedChunk = chunk.subarray(0, acceptedBytes);
+      stdoutChunks.push(acceptedChunk);
+      protocolBytes += acceptedBytes;
+      processProtocolChunk(acceptedChunk);
+    }
+
+    if (!hasLineError && acceptedBytes < chunk.length) {
+      stopWorker(new Error(formatLimitFailure(
+        "protocol",
+        "maxProtocolBytes",
+        limits.maxProtocolBytes,
+      )));
+    }
+  });
+
+  child.stdout.once("end", () => {
+    if (!hasLineError && pendingLineBytes > 0) {
+      emitLine();
+    }
+  });
+
+  child.stderr.on("data", (chunk: Buffer) => {
+    if (hasLineError) {
+      return;
+    }
+
+    const remainingBytes = limits.maxStderrBytes - stderrBytes;
+    const acceptedBytes = Math.min(chunk.length, remainingBytes);
+
+    if (acceptedBytes > 0) {
+      stderrChunks.push(chunk.subarray(0, acceptedBytes));
+      stderrBytes += acceptedBytes;
+    }
+
+    if (acceptedBytes < chunk.length) {
+      stopWorker(new Error(formatLimitFailure(
+        "stderr",
+        "maxStderrBytes",
+        limits.maxStderrBytes,
+      )));
     }
   });
 
@@ -173,7 +322,6 @@ async function invokeWorker(
   try {
     exitCode = await exitCodePromise;
   } finally {
-    stdoutLines?.close();
     signal?.removeEventListener("abort", abortWorker);
   }
 
@@ -187,15 +335,20 @@ async function invokeWorker(
 
   return {
     exitCode,
-    stdout,
-    stderr,
+    stdout: Buffer.concat(stdoutChunks, protocolBytes).toString("utf8"),
+    stderr: Buffer.concat(stderrChunks, stderrBytes).toString("utf8"),
   };
 }
 
-export async function getSupportedAgentTypes(): Promise<string[]> {
-  const { exitCode, stdout, stderr } = await invokeWorker({
-    operation: "list_agent_types",
-  });
+export async function getSupportedAgentTypes(
+  limits: AgentShellLimits = DEFAULT_AGENT_SHELL_LIMITS,
+): Promise<string[]> {
+  const { exitCode, stdout, stderr } = await invokeWorker(
+    { operation: "list_agent_types" },
+    undefined,
+    undefined,
+    limits,
+  );
 
   if (exitCode !== 0) {
     const diagnostic = stderr.trim();
@@ -233,6 +386,7 @@ export async function runAgentShell(
   request: AgentRequest,
   signal?: AbortSignal,
   onUpdate?: (update: RunUpdate) => void,
+  limits: AgentShellLimits = DEFAULT_AGENT_SHELL_LIMITS,
 ): Promise<RunResult> {
   const output: string[] = [];
   const warnings: string[] = [];
@@ -294,6 +448,18 @@ export async function runAgentShell(
     }
 
     if (event.type === "text") {
+      const nextOutput = output.length > 0
+        ? `${output.join("\n")}\n${event.content}`
+        : event.content;
+
+      if (Buffer.byteLength(nextOutput) > limits.maxOutputBytes) {
+        output.length = 0;
+        output.push(takeUtf8Prefix(nextOutput, limits.maxOutputBytes));
+        throw new Error(
+          formatOutputLimitFailure(limits.maxOutputBytes, output),
+        );
+      }
+
       output.push(event.content);
       onUpdate?.({
         output: output.join("\n"),
@@ -311,6 +477,7 @@ export async function runAgentShell(
     request,
     signal,
     handleLine,
+    limits,
   );
 
   if (failureReason) {

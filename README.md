@@ -54,6 +54,33 @@ The tool accepts the following parameters:
 
 AgentShell warnings are included in the tool result when an agent cannot enforce a control.
 
+## Output Limits
+
+The extension stops a subagent if any of these limits are exceeded:
+
+| Setting | Default | What it limits |
+| --- | ---: | --- |
+| `maxOutputBytes` | 64 KiB | Text returned to Pi. |
+| `maxProtocolBytes` | 2 MiB | Total data sent by the AgentShell worker. |
+| `maxMessageBytes` | 256 KiB | One message sent by the AgentShell worker. |
+| `maxStderrBytes` | 256 KiB | Diagnostic output from the AgentShell worker. |
+
+When text output exceeds its limit, the failed tool result includes a UTF-8-safe truncated prefix.
+
+To override the defaults, create `~/.pi/agent/extensions/agentshell.json`:
+
+```json
+{
+  "maxOutputBytes": 131072,
+  "maxProtocolBytes": 4194304,
+  "maxMessageBytes": 524288,
+  "maxStderrBytes": 524288
+}
+```
+
+Overrides may be partial. Values are positive whole numbers in bytes. `maxOutputBytes` and
+`maxMessageBytes` cannot exceed `maxProtocolBytes`. Run `/reload` after changing the file.
+
 ## Safety and Limitations
 
 - Child processes run with the user's permissions

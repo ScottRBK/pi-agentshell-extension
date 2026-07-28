@@ -134,6 +134,56 @@ export default async function indexHarness(): Promise<void> {
   const tool = tools[0];
   assert.ok(tool);
   assert.equal(tool.name, "subagent");
+
+  if (process.env.INDEX_LIMIT_TEST === "1") {
+    const previousPath = process.env.PATH;
+    const previousResponse = process.env.FAKE_CODEX_RESPONSE;
+
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_CODEX_RESPONSE = "ab🙂cd";
+
+    try {
+      await assert.rejects(
+        tool.execute(
+          "index-test-output-limit",
+          {
+            agent_type: "codex",
+            prompt: "Return too much output",
+          },
+          undefined,
+          undefined,
+          { cwd: PYTHON_DIR },
+        ),
+        {
+          message: [
+            "AgentShell output exceeded the 5 byte limit. " +
+              "The agent was stopped.",
+            "Increase maxOutputBytes in your AgentShell extension " +
+              "configuration to override it.",
+            "",
+            "Partial output (truncated):",
+            "ab",
+          ].join("\n"),
+        },
+      );
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+
+      if (previousResponse === undefined) {
+        delete process.env.FAKE_CODEX_RESPONSE;
+      } else {
+        process.env.FAKE_CODEX_RESPONSE = previousResponse;
+      }
+    }
+
+    process.stderr.write("INDEX_LIMIT_HARNESS_OK\n");
+    return;
+  }
+
   assert.deepEqual(tool.parameters.required, ["agent_type", "prompt"]);
   assert.equal(tool.parameters.properties?.cwd?.type, "string");
   assert.equal(tool.parameters.properties?.model?.type, "string");

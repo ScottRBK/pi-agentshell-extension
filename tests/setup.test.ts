@@ -40,6 +40,14 @@ for (const [name, scenario] of scenarios) {
         join(temporaryExtension, "runner.ts"),
       );
       copyFileSync(
+        join(ROOT, "config.ts"),
+        join(temporaryExtension, "config.ts"),
+      );
+      copyFileSync(
+        join(ROOT, "limits.ts"),
+        join(temporaryExtension, "limits.ts"),
+      );
+      copyFileSync(
         join(ROOT, "python", "worker.py"),
         join(temporaryPython, "worker.py"),
       );
@@ -58,6 +66,7 @@ for (const [name, scenario] of scenarios) {
 
       const env = {
         ...process.env,
+        PI_CODING_AGENT_DIR: join(temporaryExtension, "agent"),
         REAL_AGENT_SHELL_PYTHON: REAL_PYTHON,
         SETUP_SCENARIO: scenario,
       };

@@ -16,8 +16,12 @@ if [ -n "$FAKE_CODEX_DELAY_SECONDS" ]; then
    /bin/sleep "$FAKE_CODEX_DELAY_SECONDS"
 fi
 
+response=${FAKE_CODEX_RESPONSE:-test response}
+
 echo '{"type":"thread.started","thread_id":"test-session"}'
-echo '{"type":"item.completed","item":{"type":"agent_message","text":"test response"}}'
+printf \
+   '{"type":"item.completed","item":{"type":"agent_message","text":"%s"}}\n' \
+   "$response"
 
 if [ -n "$FAKE_CODEX_RESULT_DELAY_SECONDS" ]; then
    /bin/sleep "$FAKE_CODEX_RESULT_DELAY_SECONDS"
