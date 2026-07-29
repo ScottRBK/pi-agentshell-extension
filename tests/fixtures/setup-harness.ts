@@ -31,6 +31,9 @@ interface ExecResult {
 
 interface SetupContext {
   hasUI: boolean;
+  sessionManager: {
+    getBranch(): [];
+  };
   ui: {
     confirm(title: string, message: string): Promise<boolean>;
     notify(message: string, type: NotificationType): void;
@@ -86,17 +89,18 @@ export default async function setupHarness(): Promise<void> {
     type: NotificationType;
   }> = [];
   let confirmCalls = 0;
-  let sessionStart: SessionStartHandler | undefined;
+  const sessionStarts: SessionStartHandler[] = [];
 
   const fakePi = {
+    registerCommand() {},
     registerTool(tool: CapturedTool) {
       tools.push(tool);
     },
     on(event: string, handler: SessionStartHandler) {
       assert.equal(event, "session_start");
-      assert.equal(sessionStart, undefined);
-      sessionStart = handler;
+      sessionStarts.push(handler);
     },
+    appendEntry() {},
     async exec(command: string, args: string[]): Promise<ExecResult> {
       execCalls.push({ command, args });
 
@@ -122,10 +126,13 @@ export default async function setupHarness(): Promise<void> {
   await subagentsExtension(fakePi);
 
   assert.equal(tools.length, 0);
-  assert.ok(sessionStart);
+  assert.equal(sessionStarts.length, 2);
 
   const context: SetupContext = {
     hasUI: true,
+    sessionManager: {
+      getBranch: () => [],
+    },
     ui: {
       async confirm(title, message) {
         confirmCalls += 1;
@@ -139,10 +146,12 @@ export default async function setupHarness(): Promise<void> {
     },
   };
 
-  await sessionStart(
-    { type: "session_start", reason: "startup" },
-    context,
-  );
+  for (const sessionStart of sessionStarts) {
+    await sessionStart(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
+  }
 
   if (scenario === "install") {
     assert.equal(confirmCalls, 1);

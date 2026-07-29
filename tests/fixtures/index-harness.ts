@@ -95,6 +95,12 @@ interface CapturedTool {
     theme: CapturedTheme,
     context: unknown,
   ) => CapturedComponent;
+  renderResult?: (
+    result: CapturedResult,
+    options: { expanded: boolean; isPartial: boolean },
+    theme: CapturedTheme,
+    context: { isError: boolean },
+  ) => CapturedComponent;
 }
 
 async function waitForFile(path: string): Promise<void> {
@@ -126,9 +132,12 @@ export default async function indexHarness(): Promise<void> {
   const tools: CapturedTool[] = [];
 
   const fakePi = {
+    registerCommand() {},
     registerTool(tool: CapturedTool) {
       tools.push(tool);
     },
+    on() {},
+    appendEntry() {},
   } as unknown as ExtensionAPI;
 
   await subagentsExtension(fakePi);
@@ -289,6 +298,19 @@ export default async function indexHarness(): Promise<void> {
     );
 
     assertSuccessfulResult(defaultResult);
+
+    const renderResult = tool.renderResult;
+    assert.ok(renderResult);
+    assert.deepEqual(
+      renderResult(
+        defaultResult,
+        { expanded: false, isPartial: false },
+        theme,
+        { isError: false },
+      ).render(100).map((line) => line.trimEnd()),
+      ["test response", "", "Session ID: test-session"],
+    );
+
     assert.deepEqual(updates, [
       {
         content: [

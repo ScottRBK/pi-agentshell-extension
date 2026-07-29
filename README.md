@@ -61,6 +61,14 @@ The tool accepts the following parameters:
 
 AgentShell warnings are included in the tool result when an agent cannot enforce a control.
 
+### Silent Mode
+
+Run `/agentshell-silent` to hide successful subagent responses in Pi. Run it again to restore normal
+output. Silent calls display `✓ Completed`, while warnings and errors remain visible.
+
+The parent agent still receives the complete response. The setting belongs to the current Pi session
+and survives `/reload` and session resumption. New sessions start with normal output.
+
 ### Resuming a Subagent
 
 Every successful call ends its text output with the subagent's session ID:

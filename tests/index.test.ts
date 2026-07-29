@@ -15,6 +15,9 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const HARNESS = join(ROOT, "tests", "fixtures", "index-harness.ts");
 
 test("registers and executes the subagent tool", { timeout: 15_000 }, () => {
+  const env = { ...process.env };
+  delete env.PI_AGENT_SHELL_CHILD;
+
   const completed = spawnSync(
     "pi",
     [
@@ -29,6 +32,7 @@ test("registers and executes the subagent tool", { timeout: 15_000 }, () => {
     {
       cwd: ROOT,
       encoding: "utf8",
+      env,
       input: '{"type":"get_state","id":"index-test"}\n',
       timeout: 10_000,
     },

@@ -18,6 +18,7 @@ import {
 
 const UV_INSTALL_URL =
   "https://docs.astral.sh/uv/getting-started/installation/";
+const OUTPUT_MODE_ENTRY_TYPE = "agentshell-output-mode";
 
 function setupCommand(): string {
   return [
@@ -39,9 +40,25 @@ function formatRunOutput(result: RunResult): string {
     .join("\n\n");
 }
 
+function formatToolResult(result: RunResult, silent: boolean) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: formatRunOutput(result),
+      },
+    ],
+    details: {
+      ...result.details,
+      ...(silent ? { silent: true } : {}),
+    },
+  };
+}
+
 async function registerSubagentTool(
   pi: ExtensionAPI,
   limits: AgentShellLimits,
+  isSilentMode: () => boolean,
 ): Promise<void> {
   const agentTypes = await getSupportedAgentTypes(limits);
 
@@ -115,7 +132,29 @@ async function registerSubagentTool(
       return new Text(text, 0, 0);
     },
 
+    renderResult(result, { isPartial }, theme, context) {
+      if (result.details.silent && !context.isError) {
+        const warnings = result.details.warnings.map((warning) =>
+          theme.fg("warning", `Warning: ${warning}`)
+        );
+        const completed = isPartial
+          ? []
+          : [theme.fg("success", "✓ Completed")];
+
+        return new Text([...warnings, ...completed].join("\n"), 0, 0);
+      }
+
+      const output = result.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("\n");
+      const color = context.isError ? "error" : "toolOutput";
+
+      return new Text(theme.fg(color, output), 0, 0);
+    },
+
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const silent = isSilentMode();
       const result = await runAgentShell(
         {
           agent_type: params.agent_type,
@@ -129,29 +168,15 @@ async function registerSubagentTool(
           disallowed_tools: params.disallowed_tools,
         },
         signal,
-        (update) => {
-          onUpdate?.({
-            content: [
-              {
-                type: "text",
-                text: formatRunOutput(update),
-              },
-            ],
-            details: update.details,
-          });
-        },
+        silent
+          ? undefined
+          : (update) => {
+              onUpdate?.(formatToolResult(update, false));
+            },
         limits,
       );
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: formatRunOutput(result),
-          },
-        ],
-        details: result.details,
-      };
+      return formatToolResult(result, silent);
     },
   });
 }
@@ -163,10 +188,43 @@ export default async function subagentsExtension(
     return;
   }
 
+  let silentMode = false;
+
+  pi.on("session_start", (_event, ctx) => {
+    silentMode = false;
+
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (
+        entry.type === "custom" &&
+        entry.customType === OUTPUT_MODE_ENTRY_TYPE &&
+        typeof entry.data === "object" &&
+        entry.data !== null &&
+        "silent" in entry.data &&
+        typeof entry.data.silent === "boolean"
+      ) {
+        silentMode = entry.data.silent;
+      }
+    }
+  });
+
+  pi.registerCommand("agentshell-silent", {
+    description: "Toggle display of subagent responses",
+    handler: async (_args, ctx) => {
+      silentMode = !silentMode;
+      pi.appendEntry(OUTPUT_MODE_ENTRY_TYPE, { silent: silentMode });
+      ctx.ui.notify(
+        silentMode
+          ? "Subagent responses are now hidden."
+          : "Subagent responses are now visible.",
+        "info",
+      );
+    },
+  });
+
   const limits = loadAgentShellLimits(getAgentDir());
 
   if (isAgentShellRuntimeInstalled()) {
-    await registerSubagentTool(pi, limits);
+    await registerSubagentTool(pi, limits, () => silentMode);
     return;
   }
 
@@ -251,7 +309,7 @@ export default async function subagentsExtension(
     }
 
     try {
-      await registerSubagentTool(pi, limits);
+      await registerSubagentTool(pi, limits, () => silentMode);
       ctx.ui.notify("The subagent tool is ready.", "info");
     } catch (error) {
       const message =

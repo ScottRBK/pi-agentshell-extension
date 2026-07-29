@@ -71,7 +71,7 @@ test("packs the complete AgentShell runtime for npm", () => {
   }>;
   assert.ok(manifest);
   assert.equal(manifest.name, "@scottrbk/pi-agentshell-extension");
-  assert.equal(manifest.version, "1.0.0");
+  assert.equal(manifest.version, "1.0.1");
 
   const files = manifest.files.map(({ path }) => path).sort();
   assert.deepEqual(files, EXPECTED_PACKAGE_FILES);
