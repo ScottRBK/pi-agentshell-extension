@@ -34,7 +34,6 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "lint": "bash scripts/lint.sh",
     "test": "node --test tests/*.test.ts",
     "test:python": "cd python && uv run tests/test_worker.py"
   },

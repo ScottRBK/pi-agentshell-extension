@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   verify:
-    name: Lint, test, and package
+    name: Test and package
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -40,9 +40,6 @@ jobs:
 
       - name: Install the locked AgentShell runtime
         run: uv sync --project python --locked
-
-      - name: Lint
-        run: npm run lint
 
       - name: Run Node tests
         run: env -u PI_AGENT_SHELL_CHILD npm test

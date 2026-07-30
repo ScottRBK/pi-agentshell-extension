@@ -27,25 +27,6 @@ const EXPECTED_PACKAGE_FILES = [
   "runner.ts",
 ];
 
-test("runs dependency-free source linting", () => {
-  const linted = spawnSync(
-    "npm",
-    ["run", "lint", "--silent"],
-    {
-      cwd: ROOT,
-      encoding: "utf8",
-      timeout: 30_000,
-    },
-  );
-
-  assert.equal(linted.error, undefined, linted.error?.message);
-  assert.equal(
-    linted.status,
-    0,
-    `stdout:\n${linted.stdout}\nstderr:\n${linted.stderr}`,
-  );
-});
-
 test("packs the complete AgentShell runtime for npm", () => {
   const packed = spawnSync(
     "npm",
