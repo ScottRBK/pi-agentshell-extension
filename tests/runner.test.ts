@@ -303,6 +303,49 @@ test("reports agent failures with partial output", { timeout: 5_000 }, async () 
     }
 });
 
+test("reports all agent errors in their original order", {
+    timeout: 5_000,
+}, async () => {
+    const previousPath = process.env.PATH;
+    const previousMultipleErrors = process.env.FAKE_CODEX_MULTIPLE_ERRORS;
+
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_CODEX_MULTIPLE_ERRORS = "1";
+
+    try {
+        await assert.rejects(
+            runAgentShell({
+                agent_type: "codex",
+                cwd: PYTHON_DIR,
+                prompt: "Use an unsupported model",
+            }),
+            {
+                message: [
+                    "fake agent failed",
+                    "",
+                    "Additional diagnostics:",
+                    "Reading additional input from stdin...",
+                    "",
+                    "Partial output:",
+                    "test response",
+                ].join("\n"),
+            },
+        );
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousMultipleErrors === undefined) {
+            delete process.env.FAKE_CODEX_MULTIPLE_ERRORS;
+        } else {
+            process.env.FAKE_CODEX_MULTIPLE_ERRORS = previousMultipleErrors;
+        }
+    }
+});
+
 test("reports worker fatal messages with partial output", {
     timeout: 5_000,
 }, async () => {

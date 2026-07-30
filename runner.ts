@@ -95,6 +95,21 @@ function formatFailure(
   return [reason, "", partialOutputLabel, partialOutput].join("\n");
 }
 
+function formatFailureReasons(reasons: string[]): string {
+  const [primary, ...additional] = reasons;
+
+  if (additional.length === 0) {
+    return primary ?? "unknown error";
+  }
+
+  return [
+    primary,
+    "",
+    "Additional diagnostics:",
+    ...additional,
+  ].join("\n");
+}
+
 function takeUtf8Prefix(value: string, maxBytes: number): string {
   let bytes = 0;
   let prefix = "";
@@ -391,7 +406,7 @@ export async function runAgentShell(
 ): Promise<RunResult> {
   const output: string[] = [];
   const warnings: string[] = [];
-  let failureReason: string | undefined;
+  const failureReasons: string[] = [];
   let status: "ok" | "error" | undefined;
   let sessionId: string | undefined;
   let outputTokens = 0;
@@ -417,7 +432,7 @@ export async function runAgentShell(
         throw new Error("AgentShell worker emitted an invalid fatal message");
       }
 
-      failureReason = message.message;
+      failureReasons.push(message.message);
       return;
     }
 
@@ -434,17 +449,19 @@ export async function runAgentShell(
     }
 
     if (event.type === "error" && isNonEmptyString(event.content)) {
-      failureReason = event.content;
+      failureReasons.push(event.content.trim());
     }
 
     if (event.type === "result") {
       status = event.content === "ok" ? "ok" : "error";
       outputTokens = event.output_tokens ?? 0;
 
-      if (status === "error" && !failureReason) {
-        failureReason = isNonEmptyString(event.error)
-          ? event.error
-          : `${request.agent_type} reported an unsuccessful result`;
+      if (status === "error" && failureReasons.length === 0) {
+        failureReasons.push(
+          isNonEmptyString(event.error)
+            ? event.error
+            : `${request.agent_type} reported an unsuccessful result`,
+        );
       }
     }
 
@@ -481,8 +498,11 @@ export async function runAgentShell(
     limits,
   );
 
-  if (failureReason) {
-    throw new Error(formatFailure(failureReason, output));
+  if (failureReasons.length > 0) {
+    throw new Error(formatFailure(
+      formatFailureReasons(failureReasons),
+      output,
+    ));
   }
 
   if (exitCode !== 0) {

@@ -27,7 +27,11 @@ if [ -n "$FAKE_CODEX_RESULT_DELAY_SECONDS" ]; then
    /bin/sleep "$FAKE_CODEX_RESULT_DELAY_SECONDS"
 fi
 
-if [ "$FAKE_CODEX_ERROR" = "1" ]; then
+if [ "$FAKE_CODEX_MULTIPLE_ERRORS" = "1" ]; then
+   echo '{"type":"turn.failed","error":{"message":"fake agent failed"}}'
+   printf 'Reading additional input from stdin...\n' >&2
+   exit 1
+elif [ "$FAKE_CODEX_ERROR" = "1" ]; then
    echo '{"type":"turn.failed","error":{"message":"fake agent failed"}}'
 elif [ "$FAKE_CODEX_NO_RESULT" != "1" ]; then
    echo '{"type":"turn.completed","usage":{"output_tokens":7}}'
