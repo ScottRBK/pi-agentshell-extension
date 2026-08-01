@@ -81,6 +81,9 @@ Use these commands to inspect or cancel active jobs:
 /agentshell-cancel job-1
 ```
 
+Parent agents can cancel a known Job ID through the `subagent_cancel` tool, so cancellation does not
+require the user to enter a slash command.
+
 Only active jobs remain in the registry. Completed, failed, and cancelled jobs are removed after
 their result is delivered because the result is already stored in Pi's conversation history. Job
 IDs and active jobs belong to the current Pi session. Session shutdown cancels remaining work.

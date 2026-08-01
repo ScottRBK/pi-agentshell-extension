@@ -123,6 +123,10 @@ interface CapturedTool {
           minLength?: number;
         };
       };
+      job_id?: {
+        type?: string;
+        minLength?: number;
+      };
     };
   };
   execute: (...args: any[]) => Promise<CapturedResult>;
@@ -201,16 +205,20 @@ export default async function indexHarness(): Promise<void> {
 
   await subagentsExtension(fakePi);
 
-  assert.equal(tools.length, 1);
+  assert.equal(tools.length, 2);
   assert.equal(
     shutdownHandlers.length,
     1,
     "the extension must cancel outstanding jobs on session shutdown",
   );
 
-  const tool = tools[0];
+  const tool = tools.find(({ name }) => name === "subagent");
+  const cancelTool = tools.find(({ name }) => name === "subagent_cancel");
   assert.ok(tool);
-  assert.equal(tool.name, "subagent");
+  assert.ok(cancelTool);
+  assert.deepEqual(cancelTool.parameters.required, ["job_id"]);
+  assert.equal(cancelTool.parameters.properties?.job_id?.type, "string");
+  assert.equal(cancelTool.parameters.properties?.job_id?.minLength, 1);
 
   if (process.env.INDEX_LIMIT_TEST === "1") {
     const previousPath = process.env.PATH;
@@ -536,9 +544,16 @@ export default async function indexHarness(): Promise<void> {
 
     const cancelledJobId = assertRunningJob(cancelledResult);
     await waitForFile(startedFile);
-    await cancelCommand.handler(cancelledJobId, commandContext);
-    assert.match(notifications.at(-1)?.message ?? "", new RegExp(cancelledJobId));
-    assert.match(notifications.at(-1)?.message ?? "", /cancelled/i);
+    const cancellation = await cancelTool.execute(
+      "index-test-agent-cancel",
+      { job_id: cancelledJobId },
+      undefined,
+      undefined,
+      { cwd: PYTHON_DIR },
+    );
+    assert.equal(cancellation.details.status, "cancelled");
+    assert.equal(cancellation.details.jobId, cancelledJobId);
+    assert.match(cancellation.content[0]?.text ?? "", /cancelled/i);
     await waitFor(
       () => sentMessages.length === 6,
       "the cancelled AgentShell completion",

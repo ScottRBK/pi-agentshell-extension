@@ -315,6 +315,41 @@ async function registerSubagentTool(
       return formatJobLaunch(job.id);
     },
   });
+
+  pi.registerTool({
+    name: "subagent_cancel",
+    label: "Cancel subagent",
+    description: "Cancel a running AgentShell subagent job by ID",
+    parameters: Type.Object({
+      job_id: Type.String({
+        minLength: 1,
+        description: "Job ID returned by the subagent tool",
+      }),
+    }),
+
+    async execute(_toolCallId, params) {
+      if (!jobs.cancel(params.job_id)) {
+        throw new Error(
+          `No running subagent job found with ID ${params.job_id}.`,
+        );
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Subagent job ${params.job_id} cancelled.`,
+          },
+        ],
+        details: {
+          status: "cancelled" as const,
+          jobId: params.job_id,
+          outputTokens: 0,
+          warnings: [] as string[],
+        },
+      };
+    },
+  });
 }
 
 export default async function subagentsExtension(

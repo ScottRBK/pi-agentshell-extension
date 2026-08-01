@@ -158,8 +158,9 @@ export default async function setupHarness(): Promise<void> {
   if (scenario === "install") {
     assert.equal(confirmCalls, 1);
     assert.equal(execCalls.length, 2);
-    assert.equal(tools.length, 1);
-    assert.equal(tools[0]?.name, "subagent");
+    assert.equal(tools.length, 2);
+    assert.ok(tools.some(({ name }) => name === "subagent"));
+    assert.ok(tools.some(({ name }) => name === "subagent_cancel"));
     assert.ok(notifications.some(({ message }) => /ready/.test(message)));
   } else if (scenario === "missing-uv") {
     assert.equal(confirmCalls, 0);
