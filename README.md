@@ -84,6 +84,10 @@ Use these commands to inspect or cancel active jobs:
 Parent agents can cancel a known Job ID through the `subagent_cancel` tool, so cancellation does not
 require the user to enter a slash command.
 
+While jobs are active, Pi shows a compact widget above the editor. It displays the three oldest jobs
+and summarises any additional jobs as `+N more running`. Cancelling jobs remain visible until their
+workers stop. The widget disappears when no jobs remain.
+
 A Job ID only identifies the background job; it is not a resumable subagent session ID. The real
 session ID arrives with a successful completion result. Only active jobs remain in the registry.
 Completed, failed, and cancelled jobs are removed after their result is delivered because the result

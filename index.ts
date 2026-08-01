@@ -2,12 +2,17 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import {
   getAgentDir,
   type ExtensionAPI,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { loadAgentShellLimits } from "./config.ts";
-import { JobRegistry, type JobStatus } from "./jobs.ts";
+import {
+  JobRegistry,
+  type JobSnapshot,
+  type JobStatus,
+} from "./jobs.ts";
 import type { AgentShellLimits } from "./limits.ts";
 import {
   AGENT_SHELL_PROJECT_DIRECTORY,
@@ -21,6 +26,8 @@ const UV_INSTALL_URL =
   "https://docs.astral.sh/uv/getting-started/installation/";
 const OUTPUT_MODE_ENTRY_TYPE = "agentshell-output-mode";
 const JOB_RESULT_MESSAGE_TYPE = "agentshell-job-result";
+const JOB_WIDGET_KEY = "agentshell-jobs";
+const JOB_WIDGET_OPTIONS = { placement: "aboveEditor" as const };
 
 type TerminalJobStatus = Exclude<JobStatus, "running">;
 
@@ -88,6 +95,72 @@ function formatTerminalMessage(
   return `Subagent job ${jobId} failed.\n\n${output}`;
 }
 
+function formatJobWidgetRow(job: JobSnapshot, isLast: boolean): string {
+  const branch = isLast ? "└─" : "├─";
+  const identity = [job.agentType ?? "subagent", job.model]
+    .filter((part) => part !== undefined)
+    .join(" · ");
+  const cancelling = job.status === "cancelled" ? " · cancelling…" : "";
+
+  return `${branch} ${identity} · ${job.id.slice(0, 12)}${cancelling}`;
+}
+
+function updateJobWidget(
+  ctx: Pick<ExtensionContext, "hasUI" | "ui">,
+  jobs: JobRegistry,
+): void {
+  if (!ctx.hasUI) {
+    return;
+  }
+
+  const activeJobs = jobs.list().filter((job) =>
+    job.status === "running" || job.status === "cancelled"
+  );
+  if (activeJobs.length === 0) {
+    ctx.ui.setWidget(JOB_WIDGET_KEY, undefined, JOB_WIDGET_OPTIONS);
+    return;
+  }
+
+  const running = activeJobs.filter((job) => job.status === "running").length;
+  const cancelling = activeJobs.length - running;
+  const counts = [
+    running > 0 ? `${running} running` : "",
+    cancelling > 0 ? `${cancelling} cancelling` : "",
+  ].filter((part) => part.length > 0);
+  const glyph = running > 0 ? "●" : "■";
+  const header = ctx.ui.theme.fg(
+    running > 0 ? "accent" : "warning",
+    `${glyph} Background agents · ${counts.join(" · ")}`,
+  );
+  const visibleJobs = activeJobs.slice(0, 3);
+  const hiddenJobs = activeJobs.slice(visibleJobs.length);
+  const rows = visibleJobs.map((job, index) => {
+    const isLast = hiddenJobs.length === 0 && index === visibleJobs.length - 1;
+    const row = formatJobWidgetRow(job, isLast);
+    return job.status === "cancelled"
+      ? ctx.ui.theme.fg("warning", row)
+      : row;
+  });
+
+  if (hiddenJobs.length > 0) {
+    const hiddenStatus = hiddenJobs.every((job) => job.status === "running")
+      ? "running"
+      : "active";
+    rows.push(
+      ctx.ui.theme.fg(
+        "dim",
+        `└─ +${hiddenJobs.length} more ${hiddenStatus} · /agentshell-jobs`,
+      ),
+    );
+  }
+
+  ctx.ui.setWidget(
+    JOB_WIDGET_KEY,
+    [header, ...rows],
+    JOB_WIDGET_OPTIONS,
+  );
+}
+
 function sendTerminalMessage(
   pi: ExtensionAPI,
   jobs: JobRegistry,
@@ -97,6 +170,7 @@ function sendTerminalMessage(
   warnings: string[],
   silent: boolean,
   isShuttingDown: () => boolean,
+  onJobRemoved: () => void,
 ): void {
   try {
     if (isShuttingDown()) {
@@ -128,6 +202,10 @@ function sendTerminalMessage(
     }
   } finally {
     jobs.remove(jobId);
+
+    if (!isShuttingDown()) {
+      onJobRemoved();
+    }
   }
 }
 
@@ -262,24 +340,31 @@ async function registerSubagentTool(
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const silent = isSilentMode();
-      const job = jobs.start((signal) =>
-        runAgentShell(
-          {
-            agent_type: params.agent_type,
-            cwd: params.cwd ?? ctx.cwd,
-            prompt: params.prompt,
-            model: params.model,
-            effort: params.effort,
-            session_id: params.session_id,
-            auto_approve: params.auto_approve,
-            allowed_tools: params.allowed_tools,
-            disallowed_tools: params.disallowed_tools,
-          },
-          signal,
-          undefined,
-          limits,
-        )
+      const job = jobs.start(
+        (signal) =>
+          runAgentShell(
+            {
+              agent_type: params.agent_type,
+              cwd: params.cwd ?? ctx.cwd,
+              prompt: params.prompt,
+              model: params.model,
+              effort: params.effort,
+              session_id: params.session_id,
+              auto_approve: params.auto_approve,
+              allowed_tools: params.allowed_tools,
+              disallowed_tools: params.disallowed_tools,
+            },
+            signal,
+            undefined,
+            limits,
+          ),
+        {
+          agentType: params.agent_type,
+          model: params.model,
+        },
       );
+
+      updateJobWidget(ctx, jobs);
 
       void job.completion.then(
         (result) => {
@@ -299,6 +384,7 @@ async function registerSubagentTool(
             result.details.warnings,
             silent,
             isShuttingDown,
+            () => updateJobWidget(ctx, jobs),
           );
         },
         (error: unknown) => {
@@ -315,6 +401,7 @@ async function registerSubagentTool(
             [],
             silent,
             isShuttingDown,
+            () => updateJobWidget(ctx, jobs),
           );
         },
       );
@@ -334,12 +421,14 @@ async function registerSubagentTool(
       }),
     }),
 
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!jobs.cancel(params.job_id)) {
         throw new Error(
           `No running subagent job found with ID ${params.job_id}.`,
         );
       }
+
+      updateJobWidget(ctx, jobs);
 
       return {
         content: [
@@ -388,9 +477,13 @@ export default async function subagentsExtension(
     }
   });
 
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event, ctx) => {
     shuttingDown = true;
     jobs.cancelAll();
+
+    if (ctx.hasUI) {
+      ctx.ui.setWidget(JOB_WIDGET_KEY, undefined, JOB_WIDGET_OPTIONS);
+    }
   });
 
   pi.registerCommand("agentshell-silent", {
@@ -435,6 +528,11 @@ export default async function subagentsExtension(
       }
 
       const cancelled = jobs.cancel(jobId);
+
+      if (cancelled) {
+        updateJobWidget(ctx, jobs);
+      }
+
       ctx.ui.notify(
         cancelled
           ? `Subagent job ${jobId} cancelled.`

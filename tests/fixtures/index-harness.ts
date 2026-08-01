@@ -36,8 +36,15 @@ interface CapturedCommand {
 }
 
 interface CommandContext {
+  hasUI: boolean;
   ui: {
+    theme: CapturedTheme;
     notify(message: string, type: string): void;
+    setWidget(
+      key: string,
+      content: string[] | undefined,
+      options?: CapturedWidget["options"],
+    ): void;
   };
 }
 
@@ -57,6 +64,14 @@ interface SentMessage {
   options?: {
     triggerTurn?: boolean;
     deliverAs?: string;
+  };
+}
+
+interface CapturedWidget {
+  key: string;
+  content: string[] | undefined;
+  options?: {
+    placement?: string;
   };
 }
 
@@ -220,6 +235,27 @@ export default async function indexHarness(): Promise<void> {
   const cancelTool = tools.find(({ name }) => name === "subagent_cancel");
   assert.ok(tool);
   assert.ok(cancelTool);
+
+  const widgets: CapturedWidget[] = [];
+  const theme: CapturedTheme = {
+    bold: (text) => text,
+    fg: (_color, text) => text,
+  };
+  const toolContext = {
+    cwd: PYTHON_DIR,
+    hasUI: true,
+    ui: {
+      theme,
+      setWidget(
+        key: string,
+        content: string[] | undefined,
+        options?: CapturedWidget["options"],
+      ) {
+        widgets.push({ key, content, options });
+      },
+    },
+  };
+
   assert.match(tool.description, /Long-running subagent calls may return/i);
   assert.match(tool.description, /Do not poll/i);
   assert.match(tool.description, /sleep commands/i);
@@ -247,7 +283,7 @@ export default async function indexHarness(): Promise<void> {
         },
         undefined,
         undefined,
-        { cwd: PYTHON_DIR },
+        toolContext,
       );
 
       assertRunningJob(result);
@@ -321,11 +357,6 @@ export default async function indexHarness(): Promise<void> {
   const renderCall = tool.renderCall;
   assert.ok(renderCall);
 
-  const theme: CapturedTheme = {
-    bold: (text) => text,
-    fg: (_color, text) => text,
-  };
-
   assert.deepEqual(
     renderCall(
       {
@@ -374,9 +405,14 @@ export default async function indexHarness(): Promise<void> {
     const updates: CapturedResult[] = [];
     const notifications: Array<{ message: string; type: string }> = [];
     const commandContext: CommandContext = {
+      hasUI: true,
       ui: {
+        theme,
         notify(message, type) {
           notifications.push({ message, type });
+        },
+        setWidget(key, content, options) {
+          widgets.push({ key, content, options });
         },
       },
     };
@@ -395,12 +431,20 @@ export default async function indexHarness(): Promise<void> {
       },
       undefined,
       (update: CapturedResult) => updates.push(update),
-      { cwd: PYTHON_DIR },
+      toolContext,
     );
 
     const defaultJobId = assertRunningJob(defaultResult);
     assert.ok(Date.now() - submittedAt < 500, "subagent submission waited for completion");
     assert.deepEqual(updates, []);
+    assert.deepEqual(widgets.at(-1), {
+      key: "agentshell-jobs",
+      content: [
+        "● Background agents · 1 running",
+        `└─ codex · ${defaultJobId.slice(0, 12)}`,
+      ],
+      options: { placement: "aboveEditor" },
+    });
     await waitForFile(cwdFile);
     assert.equal(
       readFileSync(cwdFile, "utf8").trim(),
@@ -423,6 +467,11 @@ export default async function indexHarness(): Promise<void> {
     assert.match(sentMessages[0]?.message.content ?? "", /test response/);
     assert.match(sentMessages[0]?.message.content ?? "", /Session ID: test-session/);
     assert.equal(sentMessages[0]?.message.details?.status, "completed");
+    assert.deepEqual(widgets.at(-1), {
+      key: "agentshell-jobs",
+      content: undefined,
+      options: { placement: "aboveEditor" },
+    });
 
     await jobsCommand.handler("", commandContext);
     assert.match(notifications.at(-1)?.message ?? "", /no .*jobs/i);
@@ -437,7 +486,7 @@ export default async function indexHarness(): Promise<void> {
       },
       undefined,
       undefined,
-      { cwd: PYTHON_DIR },
+      toolContext,
     );
 
     assertRunningJob(overriddenResult);
@@ -465,7 +514,7 @@ export default async function indexHarness(): Promise<void> {
       },
       undefined,
       undefined,
-      { cwd: PYTHON_DIR },
+      toolContext,
     );
 
     const warning =
@@ -500,7 +549,7 @@ export default async function indexHarness(): Promise<void> {
       },
       undefined,
       undefined,
-      { cwd: PYTHON_DIR },
+      toolContext,
     );
 
     assertRunningJob(resumedResult);
@@ -525,7 +574,7 @@ export default async function indexHarness(): Promise<void> {
       },
       undefined,
       undefined,
-      { cwd: PYTHON_DIR },
+      toolContext,
     );
     assertRunningJob(failedResult);
     await waitFor(
@@ -550,7 +599,7 @@ export default async function indexHarness(): Promise<void> {
       },
       undefined,
       undefined,
-      { cwd: PYTHON_DIR },
+      toolContext,
     );
 
     const cancelledJobId = assertRunningJob(cancelledResult);
@@ -560,18 +609,26 @@ export default async function indexHarness(): Promise<void> {
       { job_id: cancelledJobId },
       undefined,
       undefined,
-      { cwd: PYTHON_DIR },
+      toolContext,
     );
     assert.equal(cancellation.details.status, "cancelled");
     assert.equal(cancellation.details.jobId, cancelledJobId);
     assert.match(cancellation.content[0]?.text ?? "", /cancelled/i);
+    assert.deepEqual(widgets.at(-1), {
+      key: "agentshell-jobs",
+      content: [
+        "■ Background agents · 1 cancelling",
+        `└─ codex · ${cancelledJobId.slice(0, 12)} · cancelling…`,
+      ],
+      options: { placement: "aboveEditor" },
+    });
     await assert.rejects(
       cancelTool.execute(
         "index-test-agent-cancel-again",
         { job_id: cancelledJobId },
         undefined,
         undefined,
-        { cwd: PYTHON_DIR },
+        toolContext,
       ),
       /No running subagent job found/,
     );
@@ -581,7 +638,7 @@ export default async function indexHarness(): Promise<void> {
         { job_id: "job-unknown" },
         undefined,
         undefined,
-        { cwd: PYTHON_DIR },
+        toolContext,
       ),
       /No running subagent job found/,
     );
@@ -609,13 +666,21 @@ export default async function indexHarness(): Promise<void> {
       },
       undefined,
       undefined,
-      { cwd: PYTHON_DIR },
+      toolContext,
     );
     const commandCancelledJobId = assertRunningJob(commandCancelledResult);
     await waitForFile(startedFile);
     await cancelCommand.handler(commandCancelledJobId, commandContext);
     assert.equal(notifications.at(-1)?.type, "info");
     assert.match(notifications.at(-1)?.message ?? "", /cancelled/i);
+    assert.deepEqual(widgets.at(-1), {
+      key: "agentshell-jobs",
+      content: [
+        "■ Background agents · 1 cancelling",
+        `└─ codex · ${commandCancelledJobId.slice(0, 12)} · cancelling…`,
+      ],
+      options: { placement: "aboveEditor" },
+    });
     await waitFor(
       () => sentMessages.length === 7,
       "the slash-command cancelled AgentShell completion",
@@ -626,6 +691,79 @@ export default async function indexHarness(): Promise<void> {
     assert.match(notifications.at(-1)?.message ?? "", /no .*jobs/i);
 
     process.env.FAKE_CODEX_STARTED_FILE = startedFile;
+    process.env.FAKE_CODEX_DELAY_SECONDS = "5";
+    rmSync(startedFile, { force: true });
+    const sentBeforeOverflow = sentMessages.length;
+    const overflowResults = await Promise.all(
+      Array.from({ length: 5 }, (_value, index) =>
+        tool.execute(
+          `index-test-overflow-${index + 1}`,
+          {
+            agent_type: "codex",
+            model: `model-${index + 1}`,
+            prompt: `Wait as background job ${index + 1}`,
+          },
+          undefined,
+          undefined,
+          toolContext,
+        )
+      ),
+    );
+    const overflowJobIds = overflowResults.map(assertRunningJob);
+    assert.deepEqual(widgets.at(-1), {
+      key: "agentshell-jobs",
+      content: [
+        "● Background agents · 5 running",
+        `├─ codex · model-1 · ${overflowJobIds[0]?.slice(0, 12)}`,
+        `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)}`,
+        `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)}`,
+        "└─ +2 more running · /agentshell-jobs",
+      ],
+      options: { placement: "aboveEditor" },
+    });
+    await waitForFile(startedFile);
+    await cancelTool.execute(
+      "index-test-overflow-cancel-1",
+      { job_id: overflowJobIds[0] },
+      undefined,
+      undefined,
+      toolContext,
+    );
+    assert.deepEqual(widgets.at(-1)?.content, [
+      "● Background agents · 4 running · 1 cancelling",
+      `├─ codex · model-1 · ${overflowJobIds[0]?.slice(0, 12)} · cancelling…`,
+      `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)}`,
+      `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)}`,
+      "└─ +2 more running · /agentshell-jobs",
+    ]);
+    await waitFor(
+      () => sentMessages.length === sentBeforeOverflow + 1,
+      "the first overflow AgentShell cancellation",
+    );
+    assert.deepEqual(widgets.at(-1)?.content, [
+      "● Background agents · 4 running",
+      `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)}`,
+      `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)}`,
+      `├─ codex · model-4 · ${overflowJobIds[3]?.slice(0, 12)}`,
+      "└─ +1 more running · /agentshell-jobs",
+    ]);
+    await Promise.all(
+      overflowJobIds.slice(1).map((jobId, index) =>
+        cancelTool.execute(
+          `index-test-overflow-cancel-${index + 2}`,
+          { job_id: jobId },
+          undefined,
+          undefined,
+          toolContext,
+        )
+      ),
+    );
+    await waitFor(
+      () => sentMessages.length === sentBeforeOverflow + 5,
+      "the overflow AgentShell completions",
+    );
+    assert.equal(widgets.at(-1)?.content, undefined);
+
     process.env.FAKE_CODEX_DELAY_SECONDS = "0.2";
     rmSync(startedFile, { force: true });
     const sentBeforeShutdown = sentMessages.length;
@@ -637,7 +775,7 @@ export default async function indexHarness(): Promise<void> {
       },
       undefined,
       undefined,
-      { cwd: PYTHON_DIR },
+      toolContext,
     );
     const secondShutdownResult = await tool.execute(
       "index-test-shutdown-second",
@@ -647,15 +785,23 @@ export default async function indexHarness(): Promise<void> {
       },
       undefined,
       undefined,
-      { cwd: PYTHON_DIR },
+      toolContext,
     );
     assertRunningJob(firstShutdownResult);
     assertRunningJob(secondShutdownResult);
     await waitForFile(startedFile);
     await delay(50);
-    await shutdownHandlers[0]?.({ type: "session_shutdown" }, {});
+    await shutdownHandlers[0]?.(
+      { type: "session_shutdown" },
+      toolContext,
+    );
     await delay(400);
     assert.equal(sentMessages.length, sentBeforeShutdown);
+    assert.deepEqual(widgets.at(-1), {
+      key: "agentshell-jobs",
+      content: undefined,
+      options: { placement: "aboveEditor" },
+    });
   } finally {
     if (previousPath === undefined) {
       delete process.env.PATH;

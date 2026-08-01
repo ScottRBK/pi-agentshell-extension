@@ -9,6 +9,13 @@ export type JobStatus =
 export interface JobSnapshot {
   readonly id: string;
   readonly status: JobStatus;
+  readonly agentType?: string;
+  readonly model?: string;
+}
+
+export interface JobMetadata {
+  readonly agentType?: string;
+  readonly model?: string;
 }
 
 export interface StartedJob<T> {
@@ -19,17 +26,22 @@ export interface StartedJob<T> {
 interface JobRecord {
   readonly id: string;
   readonly controller: AbortController;
+  readonly metadata: JobMetadata;
   status: JobStatus;
 }
 
 export class JobRegistry {
   readonly #jobs = new Map<string, JobRecord>();
 
-  start<T>(run: (signal: AbortSignal) => Promise<T>): StartedJob<T> {
+  start<T>(
+    run: (signal: AbortSignal) => Promise<T>,
+    metadata: JobMetadata = {},
+  ): StartedJob<T> {
     const id = `job-${randomUUID()}`;
     const job: JobRecord = {
       id,
       controller: new AbortController(),
+      metadata,
       status: "running",
     };
     const completion = Promise.resolve()
@@ -59,13 +71,18 @@ export class JobRegistry {
 
     return job === undefined
       ? undefined
-      : { id: job.id, status: job.status };
+      : {
+        id: job.id,
+        status: job.status,
+        ...job.metadata,
+      };
   }
 
   list(): JobSnapshot[] {
     return Array.from(this.#jobs.values(), (job) => ({
       id: job.id,
       status: job.status,
+      ...job.metadata,
     }));
   }
 
