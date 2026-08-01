@@ -8,6 +8,7 @@ node_modules/
 
 # Local environment
 .env
+.pi
 
 # macOS
 .DS_Store
