@@ -3,6 +3,20 @@ import { test } from "node:test";
 
 import { JobRegistry } from "../jobs.ts";
 
+test("does not reuse job IDs across registry instances", async () => {
+  // Arrange
+  const firstRegistry = new JobRegistry();
+  const secondRegistry = new JobRegistry();
+
+  // Act
+  const first = firstRegistry.start(async (_signal) => undefined);
+  const second = secondRegistry.start(async (_signal) => undefined);
+  await Promise.all([first.completion, second.completion]);
+
+  // Assert
+  assert.notEqual(first.id, second.id);
+});
+
 test("starts jobs immediately with unique IDs and running status", async () => {
   // Arrange
   const registry = new JobRegistry();

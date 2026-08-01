@@ -176,7 +176,14 @@ async function registerSubagentTool(
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
-    description: "Delegate a task to an AI coding agent in a separate context",
+    description: [
+      "Delegate a task to an AI coding agent in a separate context.",
+      "Long-running subagent calls may return `Subagent job <job-id> is running`.",
+      "Do not poll the process or run sleep commands. A Job ID is not a session ID.",
+      "The extension automatically delivers the result using a follow-up turn.",
+      "Continue other work or remain idle until notified.",
+      "The real resumable session ID arrives with the completion result.",
+    ].join(" "),
     parameters: Type.Object({
       agent_type: StringEnum(agentTypes, {
         description: "AgentShell agent type to run",

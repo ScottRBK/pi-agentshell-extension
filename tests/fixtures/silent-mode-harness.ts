@@ -149,7 +149,10 @@ async function waitFor(
 
 function assertRunningJob(result: CapturedResult): void {
   assert.equal(result.details.status, "running");
-  assert.match(result.details.jobId ?? "", /^job-\d+$/);
+  assert.match(
+    result.details.jobId ?? "",
+    /^job-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
   assert.match(result.content[0]?.text ?? "", /running/i);
 }
 

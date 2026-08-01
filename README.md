@@ -72,21 +72,23 @@ continue their conversation while the delegated agent runs in the background.
 
 When the job finishes, its response is delivered to the parent as a follow-up message. If the parent
 is idle, this starts a turn immediately. If the parent is already working, Pi queues the completion
-until that work finishes.
+until that work finishes. Do not poll the process or run sleep commands while waiting.
 
 Use these commands to inspect or cancel active jobs:
 
 ```text
 /agentshell-jobs
-/agentshell-cancel job-1
+/agentshell-cancel <job-id>
 ```
 
 Parent agents can cancel a known Job ID through the `subagent_cancel` tool, so cancellation does not
 require the user to enter a slash command.
 
-Only active jobs remain in the registry. Completed, failed, and cancelled jobs are removed after
-their result is delivered because the result is already stored in Pi's conversation history. Job
-IDs and active jobs belong to the current Pi session. Session shutdown cancels remaining work.
+A Job ID only identifies the background job; it is not a resumable subagent session ID. The real
+session ID arrives with a successful completion result. Only active jobs remain in the registry.
+Completed, failed, and cancelled jobs are removed after their result is delivered because the result
+is already stored in Pi's conversation history. Job IDs and active jobs belong to the current Pi
+session. Session shutdown cancels remaining work.
 
 ### Silent Mode
 

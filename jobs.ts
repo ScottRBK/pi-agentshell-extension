@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 export type JobStatus =
   | "running"
   | "completed"
@@ -22,10 +24,9 @@ interface JobRecord {
 
 export class JobRegistry {
   readonly #jobs = new Map<string, JobRecord>();
-  #nextId = 1;
 
   start<T>(run: (signal: AbortSignal) => Promise<T>): StartedJob<T> {
-    const id = `job-${this.#nextId++}`;
+    const id = `job-${randomUUID()}`;
     const job: JobRecord = {
       id,
       controller: new AbortController(),

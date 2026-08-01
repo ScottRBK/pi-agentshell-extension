@@ -83,6 +83,7 @@ interface CapturedComponent {
 
 interface CapturedTool {
   name: string;
+  description: string;
   parameters: {
     required?: string[];
     properties?: {
@@ -172,7 +173,10 @@ async function waitFor(
 
 function assertRunningJob(result: CapturedResult): string {
   assert.equal(result.details.status, "running");
-  assert.match(result.details.jobId ?? "", /^job-\d+$/);
+  assert.match(
+    result.details.jobId ?? "",
+    /^job-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
   assert.match(result.content[0]?.text ?? "", /running/i);
 
   return result.details.jobId as string;
@@ -216,6 +220,13 @@ export default async function indexHarness(): Promise<void> {
   const cancelTool = tools.find(({ name }) => name === "subagent_cancel");
   assert.ok(tool);
   assert.ok(cancelTool);
+  assert.match(tool.description, /Long-running subagent calls may return/i);
+  assert.match(tool.description, /Do not poll/i);
+  assert.match(tool.description, /sleep commands/i);
+  assert.match(tool.description, /A Job ID is not a session ID/i);
+  assert.match(tool.description, /automatically delivers.*follow-up turn/i);
+  assert.match(tool.description, /Continue other work or remain idle/i);
+  assert.match(tool.description, /resumable session ID.*completion result/i);
   assert.deepEqual(cancelTool.parameters.required, ["job_id"]);
   assert.equal(cancelTool.parameters.properties?.job_id?.type, "string");
   assert.equal(cancelTool.parameters.properties?.job_id?.minLength, 1);
@@ -554,11 +565,61 @@ export default async function indexHarness(): Promise<void> {
     assert.equal(cancellation.details.status, "cancelled");
     assert.equal(cancellation.details.jobId, cancelledJobId);
     assert.match(cancellation.content[0]?.text ?? "", /cancelled/i);
+    await assert.rejects(
+      cancelTool.execute(
+        "index-test-agent-cancel-again",
+        { job_id: cancelledJobId },
+        undefined,
+        undefined,
+        { cwd: PYTHON_DIR },
+      ),
+      /No running subagent job found/,
+    );
+    await assert.rejects(
+      cancelTool.execute(
+        "index-test-agent-cancel-unknown",
+        { job_id: "job-unknown" },
+        undefined,
+        undefined,
+        { cwd: PYTHON_DIR },
+      ),
+      /No running subagent job found/,
+    );
     await waitFor(
       () => sentMessages.length === 6,
       "the cancelled AgentShell completion",
     );
     assert.match(sentMessages.at(-1)?.message.content ?? "", /cancelled|aborted/i);
+    assert.equal(sentMessages.at(-1)?.message.details?.status, "cancelled");
+
+    await cancelCommand.handler("", commandContext);
+    assert.equal(notifications.at(-1)?.type, "warning");
+    assert.match(notifications.at(-1)?.message ?? "", /Usage:/);
+
+    await cancelCommand.handler("job-unknown", commandContext);
+    assert.equal(notifications.at(-1)?.type, "warning");
+    assert.match(notifications.at(-1)?.message ?? "", /No running subagent job found/);
+
+    rmSync(startedFile, { force: true });
+    const commandCancelledResult = await tool.execute(
+      "index-test-command-cancelled",
+      {
+        agent_type: "codex",
+        prompt: "Wait for slash-command cancellation",
+      },
+      undefined,
+      undefined,
+      { cwd: PYTHON_DIR },
+    );
+    const commandCancelledJobId = assertRunningJob(commandCancelledResult);
+    await waitForFile(startedFile);
+    await cancelCommand.handler(commandCancelledJobId, commandContext);
+    assert.equal(notifications.at(-1)?.type, "info");
+    assert.match(notifications.at(-1)?.message ?? "", /cancelled/i);
+    await waitFor(
+      () => sentMessages.length === 7,
+      "the slash-command cancelled AgentShell completion",
+    );
     assert.equal(sentMessages.at(-1)?.message.details?.status, "cancelled");
 
     await jobsCommand.handler("", commandContext);
