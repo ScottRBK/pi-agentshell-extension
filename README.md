@@ -86,7 +86,8 @@ require the user to enter a slash command.
 
 While jobs are active, Pi shows a compact widget above the editor. It displays the three oldest jobs
 and summarises any additional jobs as `+N more running`. Cancelling jobs remain visible until their
-workers stop. The widget disappears when no jobs remain.
+workers stop. Finished jobs then show `delivering…` until Pi starts displaying their queued
+follow-up messages. The widget disappears when no jobs or pending results remain.
 
 A Job ID only identifies the background job; it is not a resumable subagent session ID. The real
 session ID arrives with a successful completion result. Only active jobs remain in the registry.

@@ -95,48 +95,67 @@ function formatTerminalMessage(
   return `Subagent job ${jobId} failed.\n\n${output}`;
 }
 
-function formatJobWidgetRow(job: JobSnapshot, isLast: boolean): string {
+function formatJobWidgetRow(
+  job: JobSnapshot,
+  isLast: boolean,
+  deliveryStatus?: TerminalJobStatus,
+): string {
   const branch = isLast ? "└─" : "├─";
   const identity = [job.agentType ?? "subagent", job.model]
     .filter((part) => part !== undefined)
     .join(" · ");
-  const cancelling = job.status === "cancelled" ? " · cancelling…" : "";
+  const status = deliveryStatus === undefined
+    ? job.status === "cancelled" ? " · cancelling…" : ""
+    : ` · ${deliveryStatus} · delivering…`;
 
-  return `${branch} ${identity} · ${job.id.slice(0, 12)}${cancelling}`;
+  return `${branch} ${identity} · ${job.id.slice(0, 12)}${status}`;
 }
 
 function updateJobWidget(
   ctx: Pick<ExtensionContext, "hasUI" | "ui">,
   jobs: JobRegistry,
+  deliveries: ReadonlyMap<string, TerminalJobStatus>,
 ): void {
   if (!ctx.hasUI) {
     return;
   }
 
-  const activeJobs = jobs.list().filter((job) =>
-    job.status === "running" || job.status === "cancelled"
-  );
+  const activeJobs = jobs.list();
   if (activeJobs.length === 0) {
     ctx.ui.setWidget(JOB_WIDGET_KEY, undefined, JOB_WIDGET_OPTIONS);
     return;
   }
 
   const running = activeJobs.filter((job) => job.status === "running").length;
-  const cancelling = activeJobs.length - running;
+  const cancelling = activeJobs.filter((job) =>
+    job.status === "cancelled" && !deliveries.has(job.id)
+  ).length;
+  const delivering = activeJobs.filter((job) => deliveries.has(job.id)).length;
   const counts = [
     running > 0 ? `${running} running` : "",
     cancelling > 0 ? `${cancelling} cancelling` : "",
+    delivering > 0 ? `${delivering} delivering` : "",
   ].filter((part) => part.length > 0);
-  const glyph = running > 0 ? "●" : "■";
+  const glyph = running > 0 ? "●" : cancelling > 0 ? "■" : "◆";
   const header = ctx.ui.theme.fg(
-    running > 0 ? "accent" : "warning",
+    cancelling > 0 && running === 0 ? "warning" : "accent",
     `${glyph} Background agents · ${counts.join(" · ")}`,
   );
   const visibleJobs = activeJobs.slice(0, 3);
   const hiddenJobs = activeJobs.slice(visibleJobs.length);
   const rows = visibleJobs.map((job, index) => {
     const isLast = hiddenJobs.length === 0 && index === visibleJobs.length - 1;
-    const row = formatJobWidgetRow(job, isLast);
+    const deliveryStatus = deliveries.get(job.id);
+    const row = formatJobWidgetRow(job, isLast, deliveryStatus);
+
+    if (deliveryStatus === "completed") {
+      return ctx.ui.theme.fg("success", row);
+    }
+
+    if (deliveryStatus === "failed") {
+      return ctx.ui.theme.fg("error", row);
+    }
+
     return job.status === "cancelled"
       ? ctx.ui.theme.fg("warning", row)
       : row;
@@ -145,6 +164,8 @@ function updateJobWidget(
   if (hiddenJobs.length > 0) {
     const hiddenStatus = hiddenJobs.every((job) => job.status === "running")
       ? "running"
+      : hiddenJobs.every((job) => deliveries.has(job.id))
+      ? "delivering"
       : "active";
     rows.push(
       ctx.ui.theme.fg(
@@ -170,13 +191,17 @@ function sendTerminalMessage(
   warnings: string[],
   silent: boolean,
   isShuttingDown: () => boolean,
-  onJobRemoved: () => void,
+  deliveries: Map<string, TerminalJobStatus>,
+  onWidgetChange: () => void,
 ): void {
-  try {
-    if (isShuttingDown()) {
-      return;
-    }
+  if (isShuttingDown()) {
+    jobs.remove(jobId);
+    return;
+  }
 
+  deliveries.set(jobId, status);
+
+  try {
     pi.sendMessage<JobResultMessageDetails>(
       {
         customType: JOB_RESULT_MESSAGE_TYPE,
@@ -194,19 +219,43 @@ function sendTerminalMessage(
         deliverAs: "followUp",
       },
     );
+    onWidgetChange();
   } catch (error) {
-    if (!isShuttingDown()) {
-      process.stderr.write(
-        `Could not deliver subagent job ${jobId}: ${errorMessage(error)}\n`,
-      );
-    }
-  } finally {
+    process.stderr.write(
+      `Could not deliver subagent job ${jobId}: ${errorMessage(error)}\n`,
+    );
+    deliveries.delete(jobId);
     jobs.remove(jobId);
-
-    if (!isShuttingDown()) {
-      onJobRemoved();
-    }
+    onWidgetChange();
   }
+}
+
+function registerJobDeliveryHandler(
+  pi: ExtensionAPI,
+  jobs: JobRegistry,
+  deliveries: Map<string, TerminalJobStatus>,
+): void {
+  pi.on("message_start", (event, ctx) => {
+    const message = event.message;
+
+    if (
+      message.role !== "custom" ||
+      message.customType !== JOB_RESULT_MESSAGE_TYPE ||
+      typeof message.details !== "object" ||
+      message.details === null ||
+      !("jobId" in message.details) ||
+      typeof message.details.jobId !== "string"
+    ) {
+      return;
+    }
+
+    const jobId = message.details.jobId;
+
+    if (deliveries.delete(jobId)) {
+      jobs.remove(jobId);
+      updateJobWidget(ctx, jobs, deliveries);
+    }
+  });
 }
 
 function registerJobMessageRenderer(pi: ExtensionAPI): void {
@@ -244,12 +293,14 @@ async function registerSubagentTool(
   pi: ExtensionAPI,
   limits: AgentShellLimits,
   jobs: JobRegistry,
+  deliveries: Map<string, TerminalJobStatus>,
   isSilentMode: () => boolean,
   isShuttingDown: () => boolean,
 ): Promise<void> {
   const agentTypes = await getSupportedAgentTypes(limits);
 
   registerJobMessageRenderer(pi);
+  registerJobDeliveryHandler(pi, jobs, deliveries);
 
   pi.registerTool({
     name: "subagent",
@@ -364,7 +415,7 @@ async function registerSubagentTool(
         },
       );
 
-      updateJobWidget(ctx, jobs);
+      updateJobWidget(ctx, jobs, deliveries);
 
       void job.completion.then(
         (result) => {
@@ -384,7 +435,8 @@ async function registerSubagentTool(
             result.details.warnings,
             silent,
             isShuttingDown,
-            () => updateJobWidget(ctx, jobs),
+            deliveries,
+            () => updateJobWidget(ctx, jobs, deliveries),
           );
         },
         (error: unknown) => {
@@ -401,7 +453,8 @@ async function registerSubagentTool(
             [],
             silent,
             isShuttingDown,
-            () => updateJobWidget(ctx, jobs),
+            deliveries,
+            () => updateJobWidget(ctx, jobs, deliveries),
           );
         },
       );
@@ -428,7 +481,7 @@ async function registerSubagentTool(
         );
       }
 
-      updateJobWidget(ctx, jobs);
+      updateJobWidget(ctx, jobs, deliveries);
 
       return {
         content: [
@@ -456,6 +509,7 @@ export default async function subagentsExtension(
   }
 
   const jobs = new JobRegistry();
+  const deliveries = new Map<string, TerminalJobStatus>();
   let shuttingDown = false;
   let silentMode = false;
 
@@ -480,6 +534,7 @@ export default async function subagentsExtension(
   pi.on("session_shutdown", (_event, ctx) => {
     shuttingDown = true;
     jobs.cancelAll();
+    deliveries.clear();
 
     if (ctx.hasUI) {
       ctx.ui.setWidget(JOB_WIDGET_KEY, undefined, JOB_WIDGET_OPTIONS);
@@ -530,7 +585,7 @@ export default async function subagentsExtension(
       const cancelled = jobs.cancel(jobId);
 
       if (cancelled) {
-        updateJobWidget(ctx, jobs);
+        updateJobWidget(ctx, jobs, deliveries);
       }
 
       ctx.ui.notify(
@@ -548,6 +603,7 @@ export default async function subagentsExtension(
       pi,
       limits,
       jobs,
+      deliveries,
       () => silentMode,
       () => shuttingDown,
     );

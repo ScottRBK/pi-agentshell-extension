@@ -53,6 +53,7 @@ interface CapturedMessage {
   content: string;
   display: boolean;
   details?: {
+    jobId?: string;
     status?: string;
     silent?: boolean;
     warnings?: string[];
@@ -77,6 +78,14 @@ interface CapturedWidget {
 
 type SessionShutdownHandler = (
   event: { type: "session_shutdown" },
+  context: unknown,
+) => Promise<void> | void;
+
+type MessageStartHandler = (
+  event: {
+    type: "message_start";
+    message: CapturedMessage & { role: "custom" };
+  },
   context: unknown,
 ) => Promise<void> | void;
 
@@ -201,7 +210,21 @@ export default async function indexHarness(): Promise<void> {
   const commands: CapturedCommand[] = [];
   const sentMessages: SentMessage[] = [];
   const shutdownHandlers: SessionShutdownHandler[] = [];
+  const messageStartHandlers: MessageStartHandler[] = [];
   const tools: CapturedTool[] = [];
+  let deferMessageDelivery = false;
+  let eventContext: unknown;
+
+  const deliverMessage = (message: CapturedMessage): void => {
+    const event = {
+      type: "message_start" as const,
+      message: { role: "custom" as const, ...message },
+    };
+
+    for (const handler of messageStartHandlers) {
+      void handler(event, eventContext);
+    }
+  };
 
   const fakePi = {
     registerCommand(name: string, command: Omit<CapturedCommand, "name">) {
@@ -211,14 +234,23 @@ export default async function indexHarness(): Promise<void> {
       tools.push(tool);
     },
     registerMessageRenderer() {},
-    on(event: string, handler: SessionShutdownHandler) {
+    on(
+      event: string,
+      handler: SessionShutdownHandler | MessageStartHandler,
+    ) {
       if (event === "session_shutdown") {
-        shutdownHandlers.push(handler);
+        shutdownHandlers.push(handler as SessionShutdownHandler);
+      } else if (event === "message_start") {
+        messageStartHandlers.push(handler as MessageStartHandler);
       }
     },
     appendEntry() {},
     sendMessage(message: CapturedMessage, options: SentMessage["options"]) {
       sentMessages.push({ message, options });
+
+      if (!deferMessageDelivery) {
+        deliverMessage(message);
+      }
     },
   } as unknown as ExtensionAPI;
 
@@ -255,6 +287,7 @@ export default async function indexHarness(): Promise<void> {
       },
     },
   };
+  eventContext = toolContext;
 
   assert.match(tool.description, /Long-running subagent calls may return/i);
   assert.match(tool.description, /Do not poll/i);
@@ -422,6 +455,7 @@ export default async function indexHarness(): Promise<void> {
     assert.ok(cancelCommand, "the extension must register /agentshell-cancel");
 
     process.env.FAKE_CODEX_DELAY_SECONDS = "1";
+    deferMessageDelivery = true;
     const submittedAt = Date.now();
     const defaultResult = await tool.execute(
       "index-test-default-cwd",
@@ -467,6 +501,19 @@ export default async function indexHarness(): Promise<void> {
     assert.match(sentMessages[0]?.message.content ?? "", /test response/);
     assert.match(sentMessages[0]?.message.content ?? "", /Session ID: test-session/);
     assert.equal(sentMessages[0]?.message.details?.status, "completed");
+    assert.deepEqual(widgets.at(-1), {
+      key: "agentshell-jobs",
+      content: [
+        "◆ Background agents · 1 delivering",
+        `└─ codex · ${defaultJobId.slice(0, 12)} · completed · delivering…`,
+      ],
+      options: { placement: "aboveEditor" },
+    });
+
+    const firstMessage = sentMessages[0]?.message;
+    assert.ok(firstMessage);
+    deliverMessage(firstMessage);
+    deferMessageDelivery = false;
     assert.deepEqual(widgets.at(-1), {
       key: "agentshell-jobs",
       content: undefined,
@@ -692,6 +739,7 @@ export default async function indexHarness(): Promise<void> {
 
     process.env.FAKE_CODEX_STARTED_FILE = startedFile;
     process.env.FAKE_CODEX_DELAY_SECONDS = "5";
+    deferMessageDelivery = true;
     rmSync(startedFile, { force: true });
     const sentBeforeOverflow = sentMessages.length;
     const overflowResults = await Promise.all(
@@ -741,6 +789,16 @@ export default async function indexHarness(): Promise<void> {
       "the first overflow AgentShell cancellation",
     );
     assert.deepEqual(widgets.at(-1)?.content, [
+      "● Background agents · 4 running · 1 delivering",
+      `├─ codex · model-1 · ${overflowJobIds[0]?.slice(0, 12)} · cancelled · delivering…`,
+      `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)}`,
+      `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)}`,
+      "└─ +2 more running · /agentshell-jobs",
+    ]);
+    const firstOverflowMessage = sentMessages[sentBeforeOverflow]?.message;
+    assert.ok(firstOverflowMessage);
+    deliverMessage(firstOverflowMessage);
+    assert.deepEqual(widgets.at(-1)?.content, [
       "● Background agents · 4 running",
       `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)}`,
       `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)}`,
@@ -762,6 +820,17 @@ export default async function indexHarness(): Promise<void> {
       () => sentMessages.length === sentBeforeOverflow + 5,
       "the overflow AgentShell completions",
     );
+    assert.deepEqual(widgets.at(-1)?.content, [
+      "◆ Background agents · 4 delivering",
+      `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)} · cancelled · delivering…`,
+      `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)} · cancelled · delivering…`,
+      `├─ codex · model-4 · ${overflowJobIds[3]?.slice(0, 12)} · cancelled · delivering…`,
+      "└─ +1 more delivering · /agentshell-jobs",
+    ]);
+    for (const sent of sentMessages.slice(sentBeforeOverflow + 1)) {
+      deliverMessage(sent.message);
+    }
+    deferMessageDelivery = false;
     assert.equal(widgets.at(-1)?.content, undefined);
 
     process.env.FAKE_CODEX_DELAY_SECONDS = "0.2";
