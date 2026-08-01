@@ -7,6 +7,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import { loadAgentShellLimits } from "./config.ts";
+import { JobRegistry, type JobStatus } from "./jobs.ts";
 import type { AgentShellLimits } from "./limits.ts";
 import {
   AGENT_SHELL_PROJECT_DIRECTORY,
@@ -19,6 +20,16 @@ import {
 const UV_INSTALL_URL =
   "https://docs.astral.sh/uv/getting-started/installation/";
 const OUTPUT_MODE_ENTRY_TYPE = "agentshell-output-mode";
+const JOB_RESULT_MESSAGE_TYPE = "agentshell-job-result";
+
+type TerminalJobStatus = Exclude<JobStatus, "running">;
+
+interface JobResultMessageDetails {
+  jobId: string;
+  status: TerminalJobStatus;
+  warnings: string[];
+  silent?: boolean;
+}
 
 function setupCommand(): string {
   return [
@@ -40,27 +51,127 @@ function formatRunOutput(result: RunResult): string {
     .join("\n\n");
 }
 
-function formatToolResult(result: RunResult, silent: boolean) {
+function formatJobLaunch(jobId: string) {
   return {
     content: [
       {
         type: "text" as const,
-        text: formatRunOutput(result),
+        text: `Subagent job ${jobId} is running.`,
       },
     ],
     details: {
-      ...result.details,
-      ...(silent ? { silent: true } : {}),
+      status: "running" as const,
+      jobId,
+      outputTokens: 0,
+      warnings: [] as string[],
     },
   };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatTerminalMessage(
+  jobId: string,
+  status: TerminalJobStatus,
+  output: string,
+): string {
+  if (status === "completed") {
+    return `Subagent job ${jobId} completed.\n\n${output}`;
+  }
+
+  if (status === "cancelled") {
+    return `Subagent job ${jobId} was cancelled.\n\n${output}`;
+  }
+
+  return `Subagent job ${jobId} failed.\n\n${output}`;
+}
+
+function sendTerminalMessage(
+  pi: ExtensionAPI,
+  jobs: JobRegistry,
+  jobId: string,
+  status: TerminalJobStatus,
+  output: string,
+  warnings: string[],
+  silent: boolean,
+  isShuttingDown: () => boolean,
+): void {
+  try {
+    if (isShuttingDown()) {
+      return;
+    }
+
+    pi.sendMessage<JobResultMessageDetails>(
+      {
+        customType: JOB_RESULT_MESSAGE_TYPE,
+        content: formatTerminalMessage(jobId, status, output),
+        display: true,
+        details: {
+          jobId,
+          status,
+          warnings,
+          ...(silent ? { silent: true } : {}),
+        },
+      },
+      {
+        triggerTurn: true,
+        deliverAs: "followUp",
+      },
+    );
+  } catch (error) {
+    if (!isShuttingDown()) {
+      process.stderr.write(
+        `Could not deliver subagent job ${jobId}: ${errorMessage(error)}\n`,
+      );
+    }
+  } finally {
+    jobs.remove(jobId);
+  }
+}
+
+function registerJobMessageRenderer(pi: ExtensionAPI): void {
+  pi.registerMessageRenderer<JobResultMessageDetails>(
+    JOB_RESULT_MESSAGE_TYPE,
+    (message, _options, theme) => {
+      const details = message.details;
+      const content = typeof message.content === "string"
+        ? message.content
+        : message.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n");
+
+      if (details?.silent && details.status === "completed") {
+        const warnings = details.warnings.map((warning) =>
+          theme.fg("warning", `Warning: ${warning}`)
+        );
+        const completed = theme.fg("success", "✓ Completed");
+        return new Text([...warnings, completed].join("\n"), 0, 0);
+      }
+
+      const color = details?.status === "failed"
+        ? "error"
+        : details?.status === "cancelled"
+        ? "warning"
+        : "toolOutput";
+
+      return new Text(theme.fg(color, content), 0, 0);
+    },
+  );
 }
 
 async function registerSubagentTool(
   pi: ExtensionAPI,
   limits: AgentShellLimits,
+  jobs: JobRegistry,
   isSilentMode: () => boolean,
+  isShuttingDown: () => boolean,
 ): Promise<void> {
   const agentTypes = await getSupportedAgentTypes(limits);
+
+  registerJobMessageRenderer(pi);
 
   pi.registerTool({
     name: "subagent",
@@ -132,18 +243,7 @@ async function registerSubagentTool(
       return new Text(text, 0, 0);
     },
 
-    renderResult(result, { isPartial }, theme, context) {
-      if (result.details.silent && !context.isError) {
-        const warnings = result.details.warnings.map((warning) =>
-          theme.fg("warning", `Warning: ${warning}`)
-        );
-        const completed = isPartial
-          ? []
-          : [theme.fg("success", "✓ Completed")];
-
-        return new Text([...warnings, ...completed].join("\n"), 0, 0);
-      }
-
+    renderResult(result, _options, theme, context) {
       const output = result.content
         .filter((part) => part.type === "text")
         .map((part) => part.text)
@@ -153,30 +253,66 @@ async function registerSubagentTool(
       return new Text(theme.fg(color, output), 0, 0);
     },
 
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const silent = isSilentMode();
-      const result = await runAgentShell(
-        {
-          agent_type: params.agent_type,
-          cwd: params.cwd ?? ctx.cwd,
-          prompt: params.prompt,
-          model: params.model,
-          effort: params.effort,
-          session_id: params.session_id,
-          auto_approve: params.auto_approve,
-          allowed_tools: params.allowed_tools,
-          disallowed_tools: params.disallowed_tools,
-        },
-        signal,
-        silent
-          ? undefined
-          : (update) => {
-              onUpdate?.(formatToolResult(update, false));
-            },
-        limits,
+      const job = jobs.start((signal) =>
+        runAgentShell(
+          {
+            agent_type: params.agent_type,
+            cwd: params.cwd ?? ctx.cwd,
+            prompt: params.prompt,
+            model: params.model,
+            effort: params.effort,
+            session_id: params.session_id,
+            auto_approve: params.auto_approve,
+            allowed_tools: params.allowed_tools,
+            disallowed_tools: params.disallowed_tools,
+          },
+          signal,
+          undefined,
+          limits,
+        )
       );
 
-      return formatToolResult(result, silent);
+      void job.completion.then(
+        (result) => {
+          const status = jobs.get(job.id)?.status === "cancelled"
+            ? "cancelled"
+            : "completed";
+          const output = status === "cancelled"
+            ? "The worker stopped after cancellation."
+            : formatRunOutput(result);
+
+          sendTerminalMessage(
+            pi,
+            jobs,
+            job.id,
+            status,
+            output,
+            result.details.warnings,
+            silent,
+            isShuttingDown,
+          );
+        },
+        (error: unknown) => {
+          const status = jobs.get(job.id)?.status === "cancelled"
+            ? "cancelled"
+            : "failed";
+
+          sendTerminalMessage(
+            pi,
+            jobs,
+            job.id,
+            status,
+            errorMessage(error),
+            [],
+            silent,
+            isShuttingDown,
+          );
+        },
+      );
+
+      return formatJobLaunch(job.id);
     },
   });
 }
@@ -188,9 +324,12 @@ export default async function subagentsExtension(
     return;
   }
 
+  const jobs = new JobRegistry();
+  let shuttingDown = false;
   let silentMode = false;
 
   pi.on("session_start", (_event, ctx) => {
+    shuttingDown = false;
     silentMode = false;
 
     for (const entry of ctx.sessionManager.getBranch()) {
@@ -207,6 +346,11 @@ export default async function subagentsExtension(
     }
   });
 
+  pi.on("session_shutdown", () => {
+    shuttingDown = true;
+    jobs.cancelAll();
+  });
+
   pi.registerCommand("agentshell-silent", {
     description: "Toggle display of subagent responses",
     handler: async (_args, ctx) => {
@@ -221,10 +365,55 @@ export default async function subagentsExtension(
     },
   });
 
+  pi.registerCommand("agentshell-jobs", {
+    description: "List active AgentShell subagent jobs",
+    handler: async (_args, ctx) => {
+      const activeJobs = jobs.list();
+
+      if (activeJobs.length === 0) {
+        ctx.ui.notify("No active subagent jobs.", "info");
+        return;
+      }
+
+      ctx.ui.notify(
+        activeJobs.map((job) => `${job.id}: ${job.status}`).join("\n"),
+        "info",
+      );
+    },
+  });
+
+  pi.registerCommand("agentshell-cancel", {
+    description: "Cancel an active AgentShell subagent job by ID",
+    handler: async (args, ctx) => {
+      const jobId = args.trim();
+
+      if (jobId.length === 0) {
+        ctx.ui.notify("Usage: /agentshell-cancel <job-id>", "warning");
+        return;
+      }
+
+      const cancelled = jobs.cancel(jobId);
+      ctx.ui.notify(
+        cancelled
+          ? `Subagent job ${jobId} cancelled.`
+          : `No running subagent job found with ID ${jobId}.`,
+        cancelled ? "info" : "warning",
+      );
+    },
+  });
+
   const limits = loadAgentShellLimits(getAgentDir());
+  const registerTool = () =>
+    registerSubagentTool(
+      pi,
+      limits,
+      jobs,
+      () => silentMode,
+      () => shuttingDown,
+    );
 
   if (isAgentShellRuntimeInstalled()) {
-    await registerSubagentTool(pi, limits, () => silentMode);
+    await registerTool();
     return;
   }
 
@@ -309,7 +498,7 @@ export default async function subagentsExtension(
     }
 
     try {
-      await registerSubagentTool(pi, limits, () => silentMode);
+      await registerTool();
       ctx.ui.notify("The subagent tool is ready.", "info");
     } catch (error) {
       const message =

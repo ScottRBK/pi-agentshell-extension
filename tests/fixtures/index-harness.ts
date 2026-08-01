@@ -23,11 +23,47 @@ interface CapturedResult {
   content: Array<{ type: string; text: string }>;
   details: {
     status: string;
+    jobId?: string;
     sessionId?: string;
     outputTokens: number;
     warnings: string[];
   };
 }
+
+interface CapturedCommand {
+  name: string;
+  handler(args: string, context: CommandContext): Promise<void>;
+}
+
+interface CommandContext {
+  ui: {
+    notify(message: string, type: string): void;
+  };
+}
+
+interface CapturedMessage {
+  customType: string;
+  content: string;
+  display: boolean;
+  details?: {
+    status?: string;
+    silent?: boolean;
+    warnings?: string[];
+  };
+}
+
+interface SentMessage {
+  message: CapturedMessage;
+  options?: {
+    triggerTurn?: boolean;
+    deliverAs?: string;
+  };
+}
+
+type SessionShutdownHandler = (
+  event: { type: "session_shutdown" },
+  context: unknown,
+) => Promise<void> | void;
 
 interface CapturedCallArguments {
   agent_type: string;
@@ -115,34 +151,62 @@ async function waitForFile(path: string): Promise<void> {
   }
 }
 
-function assertSuccessfulResult(result: CapturedResult): void {
-  assert.deepEqual(result.content, [
-    {
-      type: "text",
-      text: "test response\n\nSession ID: test-session",
-    },
-  ]);
-  assert.equal(result.details.status, "ok");
-  assert.equal(result.details.sessionId, "test-session");
-  assert.equal(result.details.outputTokens, 7);
-  assert.deepEqual(result.details.warnings, []);
+async function waitFor(
+  condition: () => boolean,
+  description: string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+
+  while (!condition()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for ${description}`);
+    }
+
+    await delay(10);
+  }
+}
+
+function assertRunningJob(result: CapturedResult): string {
+  assert.equal(result.details.status, "running");
+  assert.match(result.details.jobId ?? "", /^job-\d+$/);
+  assert.match(result.content[0]?.text ?? "", /running/i);
+
+  return result.details.jobId as string;
 }
 
 export default async function indexHarness(): Promise<void> {
+  const commands: CapturedCommand[] = [];
+  const sentMessages: SentMessage[] = [];
+  const shutdownHandlers: SessionShutdownHandler[] = [];
   const tools: CapturedTool[] = [];
 
   const fakePi = {
-    registerCommand() {},
+    registerCommand(name: string, command: Omit<CapturedCommand, "name">) {
+      commands.push({ name, ...command });
+    },
     registerTool(tool: CapturedTool) {
       tools.push(tool);
     },
-    on() {},
+    registerMessageRenderer() {},
+    on(event: string, handler: SessionShutdownHandler) {
+      if (event === "session_shutdown") {
+        shutdownHandlers.push(handler);
+      }
+    },
     appendEntry() {},
+    sendMessage(message: CapturedMessage, options: SentMessage["options"]) {
+      sentMessages.push({ message, options });
+    },
   } as unknown as ExtensionAPI;
 
   await subagentsExtension(fakePi);
 
   assert.equal(tools.length, 1);
+  assert.equal(
+    shutdownHandlers.length,
+    1,
+    "the extension must cancel outstanding jobs on session shutdown",
+  );
 
   const tool = tools[0];
   assert.ok(tool);
@@ -156,28 +220,30 @@ export default async function indexHarness(): Promise<void> {
     process.env.FAKE_CODEX_RESPONSE = "ab🙂cd";
 
     try {
-      await assert.rejects(
-        tool.execute(
-          "index-test-output-limit",
-          {
-            agent_type: "codex",
-            prompt: "Return too much output",
-          },
-          undefined,
-          undefined,
-          { cwd: PYTHON_DIR },
-        ),
+      const result = await tool.execute(
+        "index-test-output-limit",
         {
-          message: [
-            "AgentShell output exceeded the 5 byte limit. " +
-              "The agent was stopped.",
-            "Increase maxOutputBytes in your AgentShell extension " +
-              "configuration to override it.",
-            "",
-            "Partial output (truncated):",
-            "ab",
-          ].join("\n"),
+          agent_type: "codex",
+          prompt: "Return too much output",
         },
+        undefined,
+        undefined,
+        { cwd: PYTHON_DIR },
+      );
+
+      assertRunningJob(result);
+      await waitFor(
+        () => sentMessages.length === 1,
+        "the output-limit failure message",
+      );
+      assert.equal(sentMessages[0]?.message.details?.status, "failed");
+      assert.match(
+        sentMessages[0]?.message.content ?? "",
+        /AgentShell output exceeded the 5 byte limit/,
+      );
+      assert.match(
+        sentMessages[0]?.message.content ?? "",
+        /Partial output \(truncated\):\nab/,
       );
     } finally {
       if (previousPath === undefined) {
@@ -280,12 +346,28 @@ export default async function indexHarness(): Promise<void> {
   const previousCwdFile = process.env.FAKE_CODEX_CWD_FILE;
   const previousStartedFile = process.env.FAKE_CODEX_STARTED_FILE;
   const previousDelay = process.env.FAKE_CODEX_DELAY_SECONDS;
+  const previousError = process.env.FAKE_CODEX_ERROR;
   process.env.PATH = FAKE_BIN;
   process.env.FAKE_CODEX_ARGS_FILE = argumentsFile;
   process.env.FAKE_CODEX_CWD_FILE = cwdFile;
 
   try {
     const updates: CapturedResult[] = [];
+    const notifications: Array<{ message: string; type: string }> = [];
+    const commandContext: CommandContext = {
+      ui: {
+        notify(message, type) {
+          notifications.push({ message, type });
+        },
+      },
+    };
+    const jobsCommand = commands.find(({ name }) => name === "agentshell-jobs");
+    const cancelCommand = commands.find(({ name }) => name === "agentshell-cancel");
+    assert.ok(jobsCommand, "the extension must register /agentshell-jobs");
+    assert.ok(cancelCommand, "the extension must register /agentshell-cancel");
+
+    process.env.FAKE_CODEX_DELAY_SECONDS = "1";
+    const submittedAt = Date.now();
     const defaultResult = await tool.execute(
       "index-test-default-cwd",
       {
@@ -297,41 +379,36 @@ export default async function indexHarness(): Promise<void> {
       { cwd: PYTHON_DIR },
     );
 
-    assertSuccessfulResult(defaultResult);
-
-    const renderResult = tool.renderResult;
-    assert.ok(renderResult);
-    assert.deepEqual(
-      renderResult(
-        defaultResult,
-        { expanded: false, isPartial: false },
-        theme,
-        { isError: false },
-      ).render(100).map((line) => line.trimEnd()),
-      ["test response", "", "Session ID: test-session"],
-    );
-
-    assert.deepEqual(updates, [
-      {
-        content: [
-          {
-            type: "text",
-            text: "test response\n\nSession ID: test-session",
-          },
-        ],
-        details: {
-          status: "running",
-          sessionId: "test-session",
-          outputTokens: 0,
-          warnings: [],
-        },
-      },
-    ]);
+    const defaultJobId = assertRunningJob(defaultResult);
+    assert.ok(Date.now() - submittedAt < 500, "subagent submission waited for completion");
+    assert.deepEqual(updates, []);
+    await waitForFile(cwdFile);
     assert.equal(
       readFileSync(cwdFile, "utf8").trim(),
       PYTHON_DIR,
     );
 
+    await jobsCommand.handler("", commandContext);
+    assert.match(notifications.at(-1)?.message ?? "", new RegExp(defaultJobId));
+    assert.match(notifications.at(-1)?.message ?? "", /running/i);
+
+    delete process.env.FAKE_CODEX_DELAY_SECONDS;
+    await waitFor(
+      () => sentMessages.length === 1,
+      "the successful AgentShell completion",
+    );
+    assert.deepEqual(sentMessages[0]?.options, {
+      triggerTurn: true,
+      deliverAs: "followUp",
+    });
+    assert.match(sentMessages[0]?.message.content ?? "", /test response/);
+    assert.match(sentMessages[0]?.message.content ?? "", /Session ID: test-session/);
+    assert.equal(sentMessages[0]?.message.details?.status, "completed");
+
+    await jobsCommand.handler("", commandContext);
+    assert.match(notifications.at(-1)?.message ?? "", /no .*jobs/i);
+
+    rmSync(cwdFile, { force: true });
     const overriddenResult = await tool.execute(
       "index-test-overridden-cwd",
       {
@@ -344,12 +421,18 @@ export default async function indexHarness(): Promise<void> {
       { cwd: PYTHON_DIR },
     );
 
-    assertSuccessfulResult(overriddenResult);
+    assertRunningJob(overriddenResult);
+    await waitForFile(cwdFile);
+    await waitFor(
+      () => sentMessages.length === 2,
+      "the overridden-cwd AgentShell completion",
+    );
     assert.equal(
       readFileSync(cwdFile, "utf8").trim(),
       overriddenCwd,
     );
 
+    rmSync(argumentsFile, { force: true });
     const controlledResult = await tool.execute(
       "index-test-controls",
       {
@@ -369,16 +452,11 @@ export default async function indexHarness(): Promise<void> {
     const warning =
       "Codex CLI has no per-call allowed_tools mechanism; ignoring";
 
-    assert.deepEqual(controlledResult.content, [
-      {
-        type: "text",
-        text:
-          `Warning: ${warning}\n\ntest response` +
-          "\n\nSession ID: test-session",
-      },
-    ]);
-    assert.equal(controlledResult.details.status, "ok");
-    assert.deepEqual(controlledResult.details.warnings, [warning]);
+    assertRunningJob(controlledResult);
+    await waitFor(
+      () => sentMessages.length === 3,
+      "the controlled AgentShell completion",
+    );
 
     const agentArguments = readFileSync(argumentsFile, "utf8")
       .split(/\r?\n/);
@@ -393,6 +471,7 @@ export default async function indexHarness(): Promise<void> {
     );
     assert.ok(agentArguments.includes('web_search="disabled"'));
 
+    rmSync(argumentsFile, { force: true });
     const resumedResult = await tool.execute(
       "index-test-resume",
       {
@@ -405,34 +484,102 @@ export default async function indexHarness(): Promise<void> {
       { cwd: PYTHON_DIR },
     );
 
-    assert.equal(resumedResult.details.status, "ok");
+    assertRunningJob(resumedResult);
+    await waitFor(
+      () => sentMessages.length === 4,
+      "the resumed AgentShell completion",
+    );
 
     const resumedArguments = readFileSync(argumentsFile, "utf8")
       .split(/\r?\n/);
     assert.ok(resumedArguments.includes("resume"));
     assert.ok(resumedArguments.includes("existing-session"));
 
+    assert.match(sentMessages[2]?.message.content ?? "", new RegExp(warning));
+
+    process.env.FAKE_CODEX_ERROR = "1";
+    const failedResult = await tool.execute(
+      "index-test-failed",
+      {
+        agent_type: "codex",
+        prompt: "Fail after returning partial output",
+      },
+      undefined,
+      undefined,
+      { cwd: PYTHON_DIR },
+    );
+    assertRunningJob(failedResult);
+    await waitFor(
+      () => sentMessages.length === 5,
+      "the failed AgentShell completion",
+    );
+    assert.match(sentMessages.at(-1)?.message.content ?? "", /fake agent failed/);
+    assert.equal(sentMessages.at(-1)?.message.details?.status, "failed");
+    delete process.env.FAKE_CODEX_ERROR;
+
+    await jobsCommand.handler("", commandContext);
+    assert.match(notifications.at(-1)?.message ?? "", /no .*jobs/i);
+
     process.env.FAKE_CODEX_STARTED_FILE = startedFile;
     process.env.FAKE_CODEX_DELAY_SECONDS = "2";
 
-    const controller = new AbortController();
-    const execution = tool.execute(
+    const cancelledResult = await tool.execute(
       "index-test-cancelled",
       {
         agent_type: "codex",
         prompt: "Wait for cancellation",
       },
-      controller.signal,
+      undefined,
       undefined,
       { cwd: PYTHON_DIR },
     );
 
+    const cancelledJobId = assertRunningJob(cancelledResult);
     await waitForFile(startedFile);
-    controller.abort();
+    await cancelCommand.handler(cancelledJobId, commandContext);
+    assert.match(notifications.at(-1)?.message ?? "", new RegExp(cancelledJobId));
+    assert.match(notifications.at(-1)?.message ?? "", /cancelled/i);
+    await waitFor(
+      () => sentMessages.length === 6,
+      "the cancelled AgentShell completion",
+    );
+    assert.match(sentMessages.at(-1)?.message.content ?? "", /cancelled|aborted/i);
+    assert.equal(sentMessages.at(-1)?.message.details?.status, "cancelled");
 
-    await assert.rejects(execution, {
-      message: "aborted",
-    });
+    await jobsCommand.handler("", commandContext);
+    assert.match(notifications.at(-1)?.message ?? "", /no .*jobs/i);
+
+    process.env.FAKE_CODEX_STARTED_FILE = startedFile;
+    process.env.FAKE_CODEX_DELAY_SECONDS = "0.2";
+    rmSync(startedFile, { force: true });
+    const sentBeforeShutdown = sentMessages.length;
+    const firstShutdownResult = await tool.execute(
+      "index-test-shutdown",
+      {
+        agent_type: "codex",
+        prompt: "Wait for session shutdown",
+      },
+      undefined,
+      undefined,
+      { cwd: PYTHON_DIR },
+    );
+    const secondShutdownResult = await tool.execute(
+      "index-test-shutdown-second",
+      {
+        agent_type: "codex",
+        prompt: "Wait for session shutdown too",
+      },
+      undefined,
+      undefined,
+      { cwd: PYTHON_DIR },
+    );
+    assertRunningJob(firstShutdownResult);
+    assertRunningJob(secondShutdownResult);
+    await waitForFile(startedFile);
+    await delay(50);
+    await shutdownHandlers[0]?.({ type: "session_shutdown" }, {});
+    await delay(400);
+    assert.equal(sentMessages.length, sentBeforeShutdown);
   } finally {
     if (previousPath === undefined) {
       delete process.env.PATH;
@@ -462,6 +609,12 @@ export default async function indexHarness(): Promise<void> {
       delete process.env.FAKE_CODEX_DELAY_SECONDS;
     } else {
       process.env.FAKE_CODEX_DELAY_SECONDS = previousDelay;
+    }
+
+    if (previousError === undefined) {
+      delete process.env.FAKE_CODEX_ERROR;
+    } else {
+      process.env.FAKE_CODEX_ERROR = previousError;
     }
 
     rmSync(temporaryDirectory, { recursive: true, force: true });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -27,10 +28,30 @@ interface CapturedEntry {
   data: unknown;
 }
 
+interface CapturedMessage {
+  customType: string;
+  content: string;
+  display: boolean;
+  details?: {
+    status?: string;
+    silent?: boolean;
+    warnings?: string[];
+  };
+}
+
+interface SentMessage {
+  message: CapturedMessage;
+  options?: {
+    triggerTurn?: boolean;
+    deliverAs?: string;
+  };
+}
+
 interface CapturedResult {
   content: Array<{ type: string; text: string }>;
   details: {
     status: string;
+    jobId?: string;
     sessionId?: string;
     outputTokens: number;
     warnings: string[];
@@ -50,6 +71,17 @@ interface CapturedTool {
     theme: CapturedTheme,
     context: { isError: boolean },
   ) => CapturedComponent;
+}
+
+type MessageRenderer = (
+  message: CapturedMessage,
+  options: { expanded: boolean; outputPad: number },
+  theme: CapturedTheme,
+) => CapturedComponent | undefined;
+
+interface CapturedMessageRenderer {
+  customType: string;
+  renderer: MessageRenderer;
 }
 
 interface CapturedTheme {
@@ -100,10 +132,33 @@ async function withFakeCodex<T>(
   }
 }
 
+async function waitFor(
+  condition: () => boolean,
+  description: string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+
+  while (!condition()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for ${description}`);
+    }
+
+    await delay(10);
+  }
+}
+
+function assertRunningJob(result: CapturedResult): void {
+  assert.equal(result.details.status, "running");
+  assert.match(result.details.jobId ?? "", /^job-\d+$/);
+  assert.match(result.content[0]?.text ?? "", /running/i);
+}
+
 export default async function silentModeHarness(): Promise<void> {
   const commands: CapturedCommand[] = [];
   const entries: CapturedEntry[] = [];
   const notifications: Array<{ message: string; type: string }> = [];
+  const messageRenderers: CapturedMessageRenderer[] = [];
+  const sentMessages: SentMessage[] = [];
   const tools: CapturedTool[] = [];
 
   const fakePi = {
@@ -116,16 +171,26 @@ export default async function silentModeHarness(): Promise<void> {
     registerTool(tool: CapturedTool) {
       tools.push(tool);
     },
+    registerMessageRenderer(customType: string, renderer: MessageRenderer) {
+      messageRenderers.push({ customType, renderer });
+    },
     on() {},
     appendEntry(customType: string, data: unknown) {
       entries.push({ customType, data });
+    },
+    sendMessage(message: CapturedMessage, options: SentMessage["options"]) {
+      sentMessages.push({ message, options });
     },
   } as unknown as ExtensionAPI;
 
   await subagentsExtension(fakePi);
 
-  assert.equal(commands.length, 1);
-  const command = commands[0];
+  assert.equal(
+    commands.length,
+    3,
+    "the async extension must register silent, jobs, and cancel commands",
+  );
+  const command = commands.find(({ name }) => name === "agentshell-silent");
   assert.ok(command);
   assert.equal(command.name, "agentshell-silent");
   assert.match(command.description ?? "", /subagent response/i);
@@ -156,9 +221,11 @@ export default async function silentModeHarness(): Promise<void> {
   const tool = tools[0];
   assert.ok(tool);
   const updates: CapturedResult[] = [];
-  const silentResult = await withFakeCodex(
-    "hidden response",
-    () => tool.execute(
+  const warning =
+    "Codex CLI has no per-call allowed_tools mechanism; ignoring";
+
+  await withFakeCodex("hidden response", async () => {
+    const silentResult = await tool.execute(
       "silent-mode-call",
       {
         agent_type: "codex",
@@ -168,58 +235,52 @@ export default async function silentModeHarness(): Promise<void> {
       undefined,
       (update: CapturedResult) => updates.push(update),
       { cwd: PYTHON_DIR },
-    ),
-  );
+    );
 
-  assert.deepEqual(updates, []);
-  const warning =
-    "Codex CLI has no per-call allowed_tools mechanism; ignoring";
+    assertRunningJob(silentResult);
+    assert.deepEqual(updates, []);
+    await waitFor(
+      () => sentMessages.length === 1,
+      "the silent AgentShell completion",
+    );
+  });
 
-  assert.deepEqual(silentResult.content, [
-    {
-      type: "text",
-      text:
-        `Warning: ${warning}\n\nhidden response` +
-        "\n\nSession ID: test-session",
-    },
-  ]);
-  assert.deepEqual(silentResult.details.warnings, [warning]);
-  assert.equal(silentResult.details.silent, true);
+  assert.deepEqual(sentMessages[0]?.options, {
+    triggerTurn: true,
+    deliverAs: "followUp",
+  });
+  assert.match(sentMessages[0]?.message.content ?? "", /hidden response/);
+  assert.equal(sentMessages[0]?.message.details?.silent, true);
+  assert.deepEqual(sentMessages[0]?.message.details?.warnings, [warning]);
 
-  const renderResult = tool.renderResult;
-  assert.ok(renderResult);
+  const messageRenderer = messageRenderers[0];
+  assert.ok(messageRenderer);
   const theme: CapturedTheme = {
     bold: (text) => text,
     fg: (_color, text) => text,
   };
   for (const expanded of [false, true]) {
     assert.deepEqual(
-      renderResult(
-        silentResult,
-        { expanded, isPartial: false },
+      messageRenderer.renderer(
+        sentMessages[0]?.message as CapturedMessage,
+        { expanded, outputPad: 0 },
         theme,
-        { isError: false },
-      ).render(100).map((line) => line.trimEnd()),
+      )?.render(100).map((line) => line.trimEnd()),
       [`Warning: ${warning}`, "✓ Completed"],
     );
   }
 
-  const errorResult: CapturedResult = {
-    content: [{ type: "text", text: "AgentShell failed" }],
-    details: {
-      status: "error",
-      outputTokens: 0,
-      warnings: [],
-      silent: true,
-    },
-  };
   assert.deepEqual(
-    renderResult(
-      errorResult,
-      { expanded: false, isPartial: false },
+    messageRenderer.renderer(
+      {
+        customType: messageRenderer.customType,
+        content: "AgentShell failed",
+        display: true,
+        details: { silent: true, status: "failed", warnings: [] },
+      },
+      { expanded: false, outputPad: 0 },
       theme,
-      { isError: true },
-    ).render(100).map((line) => line.trimEnd()),
+    )?.render(100).map((line) => line.trimEnd()),
     ["AgentShell failed"],
   );
 
@@ -235,9 +296,8 @@ export default async function silentModeHarness(): Promise<void> {
   });
 
   const visibleUpdates: CapturedResult[] = [];
-  const visibleResult = await withFakeCodex(
-    "visible response",
-    () => tool.execute(
+  await withFakeCodex("visible response", async () => {
+    const visibleResult = await tool.execute(
       "visible-mode-call",
       {
         agent_type: "codex",
@@ -246,20 +306,18 @@ export default async function silentModeHarness(): Promise<void> {
       undefined,
       (update: CapturedResult) => visibleUpdates.push(update),
       { cwd: PYTHON_DIR },
-    ),
-  );
+    );
 
-  assert.equal(visibleUpdates.length, 1);
-  assert.equal(visibleResult.details.silent, undefined);
-  assert.deepEqual(
-    renderResult(
-      visibleResult,
-      { expanded: false, isPartial: false },
-      theme,
-      { isError: false },
-    ).render(100).map((line) => line.trimEnd()),
-    ["visible response", "", "Session ID: test-session"],
-  );
+    assertRunningJob(visibleResult);
+    assert.deepEqual(visibleUpdates, []);
+    await waitFor(
+      () => sentMessages.length === 2,
+      "the visible AgentShell completion",
+    );
+  });
+
+  assert.equal(sentMessages[1]?.message.details?.silent, undefined);
+  assert.match(sentMessages[1]?.message.content ?? "", /visible response/);
 
   const restoredCommands: CapturedCommand[] = [];
   const restoredEntries: CapturedEntry[] = [];
@@ -277,9 +335,11 @@ export default async function silentModeHarness(): Promise<void> {
       restoredCommands.push({ name, ...registered });
     },
     registerTool() {},
+    registerMessageRenderer() {},
     on(event: string, handler: SessionStartHandler) {
-      assert.equal(event, "session_start");
-      sessionStart = handler;
+      if (event === "session_start") {
+        sessionStart = handler;
+      }
     },
     appendEntry(customType: string, data: unknown) {
       restoredEntries.push({ customType, data });
@@ -304,7 +364,9 @@ export default async function silentModeHarness(): Promise<void> {
     },
   );
 
-  const restoredCommand = restoredCommands[0];
+  const restoredCommand = restoredCommands.find(
+    ({ name }) => name === "agentshell-silent",
+  );
   assert.ok(restoredCommand);
   await restoredCommand.handler("", {
     ui: {

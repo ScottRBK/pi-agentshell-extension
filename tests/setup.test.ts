@@ -48,6 +48,10 @@ for (const [name, scenario] of scenarios) {
         join(temporaryExtension, "limits.ts"),
       );
       copyFileSync(
+        join(ROOT, "jobs.ts"),
+        join(temporaryExtension, "jobs.ts"),
+      );
+      copyFileSync(
         join(ROOT, "python", "worker.py"),
         join(temporaryPython, "worker.py"),
       );

@@ -24,6 +24,7 @@
     "docs/assets/architecture.png",
     "extensions/agentshell.ts",
     "index.ts",
+    "jobs.ts",
     "limits.ts",
     "python/pyproject.toml",
     "python/uv.lock",

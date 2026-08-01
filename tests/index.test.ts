@@ -14,7 +14,9 @@ import { fileURLToPath } from "node:url";
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const HARNESS = join(ROOT, "tests", "fixtures", "index-harness.ts");
 
-test("registers and executes the subagent tool", { timeout: 15_000 }, () => {
+test("submits subagent jobs and delivers their completions", {
+  timeout: 15_000,
+}, () => {
   const env = { ...process.env };
   delete env.PI_AGENT_SHELL_CHILD;
 

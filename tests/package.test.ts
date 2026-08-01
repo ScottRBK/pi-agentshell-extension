@@ -19,6 +19,7 @@ const EXPECTED_PACKAGE_FILES = [
   "docs/assets/architecture.png",
   "extensions/agentshell.ts",
   "index.ts",
+  "jobs.ts",
   "limits.ts",
   "package.json",
   "python/pyproject.toml",

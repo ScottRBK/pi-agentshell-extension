@@ -96,9 +96,11 @@ export default async function setupHarness(): Promise<void> {
     registerTool(tool: CapturedTool) {
       tools.push(tool);
     },
+    registerMessageRenderer() {},
     on(event: string, handler: SessionStartHandler) {
-      assert.equal(event, "session_start");
-      sessionStarts.push(handler);
+      if (event === "session_start") {
+        sessionStarts.push(handler);
+      }
     },
     appendEntry() {},
     async exec(command: string, args: string[]): Promise<ExecResult> {
