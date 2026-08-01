@@ -35,6 +35,34 @@ test("starts jobs immediately with unique IDs and running status", async () => {
   await Promise.all([first.completion, second.completion]);
 });
 
+test("keeps display metadata in job snapshots", async () => {
+  // Arrange
+  const registry = new JobRegistry();
+
+  // Act
+  const job = registry.start(
+    async () => "finished",
+    {
+      taskName: "QA review",
+      agentType: "claude_code",
+      model: "haiku",
+      effort: "medium",
+    },
+  );
+
+  // Assert
+  assert.deepEqual(registry.get(job.id), {
+    id: job.id,
+    status: "running",
+    taskName: "QA review",
+    agentType: "claude_code",
+    model: "haiku",
+    effort: "medium",
+  });
+  assert.deepEqual(registry.list(), [registry.get(job.id)]);
+  await job.completion;
+});
+
 test("marks a successful job as completed", async () => {
   // Arrange
   const registry = new JobRegistry();

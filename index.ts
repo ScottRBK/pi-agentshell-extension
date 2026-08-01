@@ -101,14 +101,32 @@ function formatJobWidgetRow(
   deliveryStatus?: TerminalJobStatus,
 ): string {
   const branch = isLast ? "└─" : "├─";
-  const identity = [job.agentType ?? "subagent", job.model]
-    .filter((part) => part !== undefined)
-    .join(" · ");
+  const taskName = job.taskName ?? "Subagent";
+  const runtime = [
+    job.agentType ?? "subagent",
+    job.model ?? "default",
+    job.effort ?? "default",
+  ].join("/");
   const status = deliveryStatus === undefined
     ? job.status === "cancelled" ? " · cancelling…" : ""
     : ` · ${deliveryStatus} · delivering…`;
 
-  return `${branch} ${identity} · ${job.id.slice(0, 12)}${status}`;
+  return `${branch} ${taskName} · ${runtime} · ${job.id.slice(0, 12)}${status}`;
+}
+
+function formatJobListEntry(
+  job: JobSnapshot,
+  isDelivering: boolean,
+): string {
+  const status = isDelivering ? "delivering" : job.status;
+  const details = [
+    job.taskName ?? "Subagent",
+    job.agentType ?? "subagent",
+    job.model ?? "default",
+    `effort: ${job.effort ?? "default"}`,
+  ].join(" · ");
+
+  return `${job.id}: ${status}\n  ${details}`;
 }
 
 function updateJobWidget(
@@ -317,6 +335,13 @@ async function registerSubagentTool(
       agent_type: StringEnum(agentTypes, {
         description: "AgentShell agent type to run",
       }),
+      task_name: Type.String({
+        minLength: 1,
+        maxLength: 40,
+        description:
+          "Short human-readable name for this delegated task, " +
+          "such as Code review or QA check",
+      }),
       cwd: Type.Optional(Type.String({
         minLength: 1,
         description:
@@ -410,8 +435,10 @@ async function registerSubagentTool(
             limits,
           ),
         {
+          taskName: params.task_name,
           agentType: params.agent_type,
           model: params.model,
+          effort: params.effort,
         },
       );
 
@@ -566,7 +593,9 @@ export default async function subagentsExtension(
       }
 
       ctx.ui.notify(
-        activeJobs.map((job) => `${job.id}: ${job.status}`).join("\n"),
+        activeJobs
+          .map((job) => formatJobListEntry(job, deliveries.has(job.id)))
+          .join("\n"),
         "info",
       );
     },

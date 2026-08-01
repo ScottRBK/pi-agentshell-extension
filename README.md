@@ -54,6 +54,7 @@ The tool accepts the following parameters:
 | Parameter | Required | Description |
 | --- | :---: | --- |
 | `agent_type` | Yes | AgentShell agent type, such as `claude_code` or `codex`. |
+| `task_name` | Yes | Short display name for the job, from 1 to 40 characters. |
 | `prompt` | Yes | Task given to the subagent. |
 | `cwd` | No | Working directory; defaults to Pi's current working directory. |
 | `model` | No | Model identifier passed to AgentShell. |
@@ -74,7 +75,8 @@ When the job finishes, its response is delivered to the parent as a follow-up me
 is idle, this starts a turn immediately. If the parent is already working, Pi queues the completion
 until that work finishes. Do not poll the process or run sleep commands while waiting.
 
-Use these commands to inspect or cancel active jobs:
+Use these commands to inspect or cancel active jobs. The job list includes each task name, harness,
+model, effort, status, and full Job ID:
 
 ```text
 /agentshell-jobs
@@ -84,8 +86,9 @@ Use these commands to inspect or cancel active jobs:
 Parent agents can cancel a known Job ID through the `subagent_cancel` tool, so cancellation does not
 require the user to enter a slash command.
 
-While jobs are active, Pi shows a compact widget above the editor. It displays the three oldest jobs
-and summarises any additional jobs as `+N more running`. Cancelling jobs remain visible until their
+While jobs are active, Pi shows a compact widget above the editor. Each row identifies the task by
+name, harness, model, effort, and shortened Job ID. The widget displays the three oldest jobs and
+summarises any additional jobs as `+N more running`. Cancelling jobs remain visible until their
 workers stop. Finished jobs then show `delivering…` until Pi starts displaying their queued
 follow-up messages. The widget disappears when no jobs or pending results remain.
 

@@ -232,6 +232,7 @@ export default async function silentModeHarness(): Promise<void> {
       "silent-mode-call",
       {
         agent_type: "codex",
+        task_name: "Hidden response",
         allowed_tools: ["Read"],
         prompt: "Return a hidden response",
       },
@@ -304,6 +305,7 @@ export default async function silentModeHarness(): Promise<void> {
       "visible-mode-call",
       {
         agent_type: "codex",
+        task_name: "Visible response",
         prompt: "Return a visible response",
       },
       undefined,

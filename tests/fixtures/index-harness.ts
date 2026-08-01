@@ -114,6 +114,11 @@ interface CapturedTool {
       agent_type?: {
         enum?: string[];
       };
+      task_name?: {
+        type?: string;
+        minLength?: number;
+        maxLength?: number;
+      };
       cwd?: {
         type?: string;
       };
@@ -296,6 +301,14 @@ export default async function indexHarness(): Promise<void> {
   assert.match(tool.description, /automatically delivers.*follow-up turn/i);
   assert.match(tool.description, /Continue other work or remain idle/i);
   assert.match(tool.description, /resumable session ID.*completion result/i);
+  assert.deepEqual(tool.parameters.required, [
+    "agent_type",
+    "task_name",
+    "prompt",
+  ]);
+  assert.equal(tool.parameters.properties?.task_name?.type, "string");
+  assert.equal(tool.parameters.properties?.task_name?.minLength, 1);
+  assert.equal(tool.parameters.properties?.task_name?.maxLength, 40);
   assert.deepEqual(cancelTool.parameters.required, ["job_id"]);
   assert.equal(cancelTool.parameters.properties?.job_id?.type, "string");
   assert.equal(cancelTool.parameters.properties?.job_id?.minLength, 1);
@@ -312,6 +325,7 @@ export default async function indexHarness(): Promise<void> {
         "index-test-output-limit",
         {
           agent_type: "codex",
+          task_name: "Output limit",
           prompt: "Return too much output",
         },
         undefined,
@@ -351,7 +365,6 @@ export default async function indexHarness(): Promise<void> {
     return;
   }
 
-  assert.deepEqual(tool.parameters.required, ["agent_type", "prompt"]);
   assert.equal(tool.parameters.properties?.cwd?.type, "string");
   assert.equal(tool.parameters.properties?.model?.type, "string");
   assert.equal(tool.parameters.properties?.model?.minLength, 1);
@@ -461,6 +474,7 @@ export default async function indexHarness(): Promise<void> {
       "index-test-default-cwd",
       {
         agent_type: "codex",
+        task_name: "Default cwd",
         prompt: "Return a test response",
       },
       undefined,
@@ -471,11 +485,13 @@ export default async function indexHarness(): Promise<void> {
     const defaultJobId = assertRunningJob(defaultResult);
     assert.ok(Date.now() - submittedAt < 500, "subagent submission waited for completion");
     assert.deepEqual(updates, []);
+    const defaultWidgetIdentity =
+      `Default cwd · codex/default/default · ${defaultJobId.slice(0, 12)}`;
     assert.deepEqual(widgets.at(-1), {
       key: "agentshell-jobs",
       content: [
         "● Background agents · 1 running",
-        `└─ codex · ${defaultJobId.slice(0, 12)}`,
+        `└─ ${defaultWidgetIdentity}`,
       ],
       options: { placement: "aboveEditor" },
     });
@@ -486,8 +502,13 @@ export default async function indexHarness(): Promise<void> {
     );
 
     await jobsCommand.handler("", commandContext);
-    assert.match(notifications.at(-1)?.message ?? "", new RegExp(defaultJobId));
-    assert.match(notifications.at(-1)?.message ?? "", /running/i);
+    assert.equal(
+      notifications.at(-1)?.message,
+      [
+        `${defaultJobId}: running`,
+        "  Default cwd · codex · default · effort: default",
+      ].join("\n"),
+    );
 
     delete process.env.FAKE_CODEX_DELAY_SECONDS;
     await waitFor(
@@ -505,10 +526,18 @@ export default async function indexHarness(): Promise<void> {
       key: "agentshell-jobs",
       content: [
         "◆ Background agents · 1 delivering",
-        `└─ codex · ${defaultJobId.slice(0, 12)} · completed · delivering…`,
+        `└─ ${defaultWidgetIdentity} · completed · delivering…`,
       ],
       options: { placement: "aboveEditor" },
     });
+    await jobsCommand.handler("", commandContext);
+    assert.equal(
+      notifications.at(-1)?.message,
+      [
+        `${defaultJobId}: delivering`,
+        "  Default cwd · codex · default · effort: default",
+      ].join("\n"),
+    );
 
     const firstMessage = sentMessages[0]?.message;
     assert.ok(firstMessage);
@@ -528,6 +557,7 @@ export default async function indexHarness(): Promise<void> {
       "index-test-overridden-cwd",
       {
         agent_type: "codex",
+        task_name: "Override cwd",
         cwd: overriddenCwd,
         prompt: "Return a test response",
       },
@@ -552,6 +582,7 @@ export default async function indexHarness(): Promise<void> {
       "index-test-controls",
       {
         agent_type: "codex",
+        task_name: "Control options",
         model: "test-model",
         effort: "high",
         auto_approve: true,
@@ -591,6 +622,7 @@ export default async function indexHarness(): Promise<void> {
       "index-test-resume",
       {
         agent_type: "codex",
+        task_name: "Resume task",
         prompt: "Continue the task",
         session_id: "existing-session",
       },
@@ -617,6 +649,7 @@ export default async function indexHarness(): Promise<void> {
       "index-test-failed",
       {
         agent_type: "codex",
+        task_name: "Expected failure",
         prompt: "Fail after returning partial output",
       },
       undefined,
@@ -642,6 +675,7 @@ export default async function indexHarness(): Promise<void> {
       "index-test-cancelled",
       {
         agent_type: "codex",
+        task_name: "Cancel tool",
         prompt: "Wait for cancellation",
       },
       undefined,
@@ -661,11 +695,13 @@ export default async function indexHarness(): Promise<void> {
     assert.equal(cancellation.details.status, "cancelled");
     assert.equal(cancellation.details.jobId, cancelledJobId);
     assert.match(cancellation.content[0]?.text ?? "", /cancelled/i);
+    const cancelledWidgetIdentity =
+      `Cancel tool · codex/default/default · ${cancelledJobId.slice(0, 12)}`;
     assert.deepEqual(widgets.at(-1), {
       key: "agentshell-jobs",
       content: [
         "■ Background agents · 1 cancelling",
-        `└─ codex · ${cancelledJobId.slice(0, 12)} · cancelling…`,
+        `└─ ${cancelledWidgetIdentity} · cancelling…`,
       ],
       options: { placement: "aboveEditor" },
     });
@@ -709,6 +745,7 @@ export default async function indexHarness(): Promise<void> {
       "index-test-command-cancelled",
       {
         agent_type: "codex",
+        task_name: "Command cancel",
         prompt: "Wait for slash-command cancellation",
       },
       undefined,
@@ -720,11 +757,15 @@ export default async function indexHarness(): Promise<void> {
     await cancelCommand.handler(commandCancelledJobId, commandContext);
     assert.equal(notifications.at(-1)?.type, "info");
     assert.match(notifications.at(-1)?.message ?? "", /cancelled/i);
+    const commandCancelledIdentity =
+      `Command cancel · codex/default/default · ${
+        commandCancelledJobId.slice(0, 12)
+      }`;
     assert.deepEqual(widgets.at(-1), {
       key: "agentshell-jobs",
       content: [
         "■ Background agents · 1 cancelling",
-        `└─ codex · ${commandCancelledJobId.slice(0, 12)} · cancelling…`,
+        `└─ ${commandCancelledIdentity} · cancelling…`,
       ],
       options: { placement: "aboveEditor" },
     });
@@ -748,7 +789,9 @@ export default async function indexHarness(): Promise<void> {
           `index-test-overflow-${index + 1}`,
           {
             agent_type: "codex",
+            task_name: `Overflow ${index + 1}`,
             model: `model-${index + 1}`,
+            effort: "medium",
             prompt: `Wait as background job ${index + 1}`,
           },
           undefined,
@@ -758,13 +801,18 @@ export default async function indexHarness(): Promise<void> {
       ),
     );
     const overflowJobIds = overflowResults.map(assertRunningJob);
+    const overflowWidgetIdentities = overflowJobIds.map((jobId, index) =>
+      `Overflow ${index + 1} · codex/model-${index + 1}/medium · ${
+        jobId.slice(0, 12)
+      }`
+    );
     assert.deepEqual(widgets.at(-1), {
       key: "agentshell-jobs",
       content: [
         "● Background agents · 5 running",
-        `├─ codex · model-1 · ${overflowJobIds[0]?.slice(0, 12)}`,
-        `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)}`,
-        `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)}`,
+        `├─ ${overflowWidgetIdentities[0]}`,
+        `├─ ${overflowWidgetIdentities[1]}`,
+        `├─ ${overflowWidgetIdentities[2]}`,
         "└─ +2 more running · /agentshell-jobs",
       ],
       options: { placement: "aboveEditor" },
@@ -779,9 +827,9 @@ export default async function indexHarness(): Promise<void> {
     );
     assert.deepEqual(widgets.at(-1)?.content, [
       "● Background agents · 4 running · 1 cancelling",
-      `├─ codex · model-1 · ${overflowJobIds[0]?.slice(0, 12)} · cancelling…`,
-      `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)}`,
-      `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)}`,
+      `├─ ${overflowWidgetIdentities[0]} · cancelling…`,
+      `├─ ${overflowWidgetIdentities[1]}`,
+      `├─ ${overflowWidgetIdentities[2]}`,
       "└─ +2 more running · /agentshell-jobs",
     ]);
     await waitFor(
@@ -790,9 +838,9 @@ export default async function indexHarness(): Promise<void> {
     );
     assert.deepEqual(widgets.at(-1)?.content, [
       "● Background agents · 4 running · 1 delivering",
-      `├─ codex · model-1 · ${overflowJobIds[0]?.slice(0, 12)} · cancelled · delivering…`,
-      `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)}`,
-      `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)}`,
+      `├─ ${overflowWidgetIdentities[0]} · cancelled · delivering…`,
+      `├─ ${overflowWidgetIdentities[1]}`,
+      `├─ ${overflowWidgetIdentities[2]}`,
       "└─ +2 more running · /agentshell-jobs",
     ]);
     const firstOverflowMessage = sentMessages[sentBeforeOverflow]?.message;
@@ -800,9 +848,9 @@ export default async function indexHarness(): Promise<void> {
     deliverMessage(firstOverflowMessage);
     assert.deepEqual(widgets.at(-1)?.content, [
       "● Background agents · 4 running",
-      `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)}`,
-      `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)}`,
-      `├─ codex · model-4 · ${overflowJobIds[3]?.slice(0, 12)}`,
+      `├─ ${overflowWidgetIdentities[1]}`,
+      `├─ ${overflowWidgetIdentities[2]}`,
+      `├─ ${overflowWidgetIdentities[3]}`,
       "└─ +1 more running · /agentshell-jobs",
     ]);
     await Promise.all(
@@ -822,9 +870,9 @@ export default async function indexHarness(): Promise<void> {
     );
     assert.deepEqual(widgets.at(-1)?.content, [
       "◆ Background agents · 4 delivering",
-      `├─ codex · model-2 · ${overflowJobIds[1]?.slice(0, 12)} · cancelled · delivering…`,
-      `├─ codex · model-3 · ${overflowJobIds[2]?.slice(0, 12)} · cancelled · delivering…`,
-      `├─ codex · model-4 · ${overflowJobIds[3]?.slice(0, 12)} · cancelled · delivering…`,
+      `├─ ${overflowWidgetIdentities[1]} · cancelled · delivering…`,
+      `├─ ${overflowWidgetIdentities[2]} · cancelled · delivering…`,
+      `├─ ${overflowWidgetIdentities[3]} · cancelled · delivering…`,
       "└─ +1 more delivering · /agentshell-jobs",
     ]);
     for (const sent of sentMessages.slice(sentBeforeOverflow + 1)) {
@@ -840,6 +888,7 @@ export default async function indexHarness(): Promise<void> {
       "index-test-shutdown",
       {
         agent_type: "codex",
+        task_name: "Shutdown one",
         prompt: "Wait for session shutdown",
       },
       undefined,
@@ -850,6 +899,7 @@ export default async function indexHarness(): Promise<void> {
       "index-test-shutdown-second",
       {
         agent_type: "codex",
+        task_name: "Shutdown two",
         prompt: "Wait for session shutdown too",
       },
       undefined,

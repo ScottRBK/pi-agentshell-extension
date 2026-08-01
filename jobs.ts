@@ -9,13 +9,17 @@ export type JobStatus =
 export interface JobSnapshot {
   readonly id: string;
   readonly status: JobStatus;
+  readonly taskName?: string;
   readonly agentType?: string;
   readonly model?: string;
+  readonly effort?: string;
 }
 
 export interface JobMetadata {
+  readonly taskName?: string;
   readonly agentType?: string;
   readonly model?: string;
+  readonly effort?: string;
 }
 
 export interface StartedJob<T> {
