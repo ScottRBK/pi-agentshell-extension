@@ -1,6 +1,6 @@
 {
   "name": "@scottrbk/pi-agentshell-extension",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Delegate Pi tasks to other coding agents through AgentShell",
   "type": "module",
   "license": "MIT",
