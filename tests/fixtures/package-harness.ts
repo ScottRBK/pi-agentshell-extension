@@ -9,6 +9,12 @@ export default function packageHarness(pi: ExtensionAPI): void {
       .find((tool) => tool.name === "subagent");
 
     assert.ok(subagent, "installed package did not register the subagent tool");
+
+    const models = pi
+      .getAllTools()
+      .find((tool) => tool.name === "subagent_list_models");
+
+    assert.ok(models, "installed package did not register the model-list tool");
     assert.match(
       JSON.stringify(subagent.sourceInfo),
       /extensions[\\/]agentshell\.ts/,

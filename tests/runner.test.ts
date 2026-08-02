@@ -14,7 +14,13 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { getSupportedAgentTypes, runAgentShell } from "../runner.ts";
+import {
+    getAgentShellModels,
+    getSupportedAgentTypes,
+    isAgentShellRuntimeInstalled,
+    runAgentShell,
+    supportsAgentShellModelDiscovery,
+} from "../runner.ts";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const PYTHON_DIR = join(ROOT, "python");
@@ -38,12 +44,205 @@ async function waitForFile(path: string): Promise<void> {
     }
 }
 
+test("keeps the AgentShell runtime available without model discovery", async () => {
+    const temporaryExtension = mkdtempSync(
+        join(tmpdir(), "pi-agentshell-model-runtime-"),
+    );
+    const temporaryBin = join(
+        temporaryExtension,
+        "python",
+        ".venv",
+        "bin",
+    );
+
+    try {
+        mkdirSync(temporaryBin, { recursive: true });
+        copyFileSync(
+            join(ROOT, "runner.ts"),
+            join(temporaryExtension, "runner.ts"),
+        );
+        copyFileSync(
+            join(ROOT, "limits.ts"),
+            join(temporaryExtension, "limits.ts"),
+        );
+        const temporaryPython = join(temporaryBin, "python");
+        writeFileSync(temporaryPython, "#!/bin/sh\nexit 1\n", "utf8");
+        chmodSync(temporaryPython, 0o755);
+
+        const temporaryRunner = await import(
+            pathToFileURL(join(temporaryExtension, "runner.ts")).href,
+        );
+
+        assert.equal(temporaryRunner.isAgentShellRuntimeInstalled(), true);
+        assert.equal(temporaryRunner.supportsAgentShellModelDiscovery(), false);
+    } finally {
+        rmSync(temporaryExtension, { recursive: true, force: true });
+    }
+});
+
 test("gets supported agent types from AgentShell", async () => {
     const agentTypes = await getSupportedAgentTypes();
     assert.ok(agentTypes.length > 0);
     assert.ok(agentTypes.includes("codex"));
     assert.ok(agentTypes.every((agentType) => agentType.trim().length > 0));
     assert.equal(new Set(agentTypes).size, agentTypes.length);
+});
+
+test("gets advertised models from AgentShell", async () => {
+    const previousPath = process.env.PATH;
+    process.env.PATH = FAKE_BIN;
+
+    try {
+        const models = await getAgentShellModels("codex", PYTHON_DIR);
+
+        assert.deepEqual(models, ["gpt-5", "gpt-5-codex"]);
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+    }
+});
+
+test("preserves an empty AgentShell model catalog", async () => {
+    const previousPath = process.env.PATH;
+    const previousNoModels = process.env.FAKE_CODEX_NO_MODELS;
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_CODEX_NO_MODELS = "1";
+
+    try {
+        const models = await getAgentShellModels("codex", PYTHON_DIR);
+
+        assert.deepEqual(models, []);
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousNoModels === undefined) {
+            delete process.env.FAKE_CODEX_NO_MODELS;
+        } else {
+            process.env.FAKE_CODEX_NO_MODELS = previousNoModels;
+        }
+    }
+});
+
+test("limits model-list output returned to Pi", async () => {
+    const previousPath = process.env.PATH;
+    process.env.PATH = FAKE_BIN;
+
+    try {
+        await assert.rejects(
+            getAgentShellModels(
+                "codex",
+                PYTHON_DIR,
+                undefined,
+                { ...GENEROUS_LIMITS, maxOutputBytes: 5 },
+            ),
+            {
+                message: [
+                    "AgentShell model list output exceeded the 5 byte limit. " +
+                        "The model list was not returned.",
+                    "Increase maxOutputBytes in your AgentShell extension " +
+                        "configuration to override it.",
+                ].join("\n"),
+            },
+        );
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+    }
+});
+
+test("rejects a null model-list protocol message", async () => {
+    const temporaryExtension = mkdtempSync(
+        join(tmpdir(), "pi-agentshell-null-models-"),
+    );
+    const temporaryBin = join(
+        temporaryExtension,
+        "python",
+        ".venv",
+        "bin",
+    );
+
+    try {
+        mkdirSync(temporaryBin, { recursive: true });
+        copyFileSync(
+            join(ROOT, "runner.ts"),
+            join(temporaryExtension, "runner.ts"),
+        );
+        copyFileSync(
+            join(ROOT, "limits.ts"),
+            join(temporaryExtension, "limits.ts"),
+        );
+        const temporaryPython = join(temporaryBin, "python");
+        writeFileSync(temporaryPython, "#!/bin/sh\nprintf 'null\\n'\n", "utf8");
+        chmodSync(temporaryPython, 0o755);
+
+        const temporaryRunner = await import(
+            pathToFileURL(join(temporaryExtension, "runner.ts")).href,
+        );
+
+        await assert.rejects(
+            temporaryRunner.getAgentShellModels("codex", PYTHON_DIR),
+            { message: "AgentShell worker returned invalid models" },
+        );
+    } finally {
+        rmSync(temporaryExtension, { recursive: true, force: true });
+    }
+});
+
+test("aborts model discovery", { timeout: 10_000 }, async () => {
+    const temporaryDirectory = mkdtempSync(
+        join(tmpdir(), "pi-agentshell-model-cancel-"),
+    );
+    const startedFile = join(temporaryDirectory, "started");
+    const previousPath = process.env.PATH;
+    const previousStartedFile = process.env.FAKE_CODEX_STARTED_FILE;
+    const previousDelay = process.env.FAKE_CODEX_DELAY_SECONDS;
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_CODEX_STARTED_FILE = startedFile;
+    process.env.FAKE_CODEX_DELAY_SECONDS = "2";
+
+    try {
+        const controller = new AbortController();
+        const discovery = getAgentShellModels(
+            "codex",
+            PYTHON_DIR,
+            controller.signal,
+        );
+
+        await waitForFile(startedFile);
+        controller.abort();
+
+        await assert.rejects(discovery, { message: "aborted" });
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousStartedFile === undefined) {
+            delete process.env.FAKE_CODEX_STARTED_FILE;
+        } else {
+            process.env.FAKE_CODEX_STARTED_FILE = previousStartedFile;
+        }
+
+        if (previousDelay === undefined) {
+            delete process.env.FAKE_CODEX_DELAY_SECONDS;
+        } else {
+            process.env.FAKE_CODEX_DELAY_SECONDS = previousDelay;
+        }
+
+        rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
 });
 
 test("runs the worker and returns its result", { timeout: 5_000 }, async () => {

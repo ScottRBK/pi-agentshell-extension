@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,6 +73,12 @@ interface WorkerProcessResult {
 interface AgentTypesMessage {
   kind?: unknown;
   agent_types?: unknown;
+}
+
+interface ModelsMessage {
+  kind?: unknown;
+  message?: unknown;
+  models?: unknown;
 }
 
 type WorkerLineHandler = (line: string) => void;
@@ -154,6 +160,15 @@ function formatOutputLimitFailure(
   return formatFailure(reason, output, "Partial output (truncated):");
 }
 
+function formatModelListLimitFailure(maxOutputBytes: number): string {
+  return [
+    `AgentShell model list output exceeded the ${maxOutputBytes} byte limit. ` +
+      "The model list was not returned.",
+    "Increase maxOutputBytes in your AgentShell extension " +
+      "configuration to override it.",
+  ].join("\n");
+}
+
 export function isAgentShellRuntimeInstalled(): boolean {
   try {
     accessSync(PYTHON, constants.X_OK);
@@ -161,6 +176,25 @@ export function isAgentShellRuntimeInstalled(): boolean {
   } catch {
     return false;
   }
+}
+
+export function supportsAgentShellModelDiscovery(): boolean {
+  if (!isAgentShellRuntimeInstalled()) {
+    return false;
+  }
+
+  const check = spawnSync(
+    PYTHON,
+    [
+      "-I",
+      "-c",
+      "from agent_shell.shell import AgentShell; " +
+        "assert hasattr(AgentShell, 'list_models')",
+    ],
+    { stdio: "ignore", timeout: 5_000 },
+  );
+
+  return check.status === 0;
 }
 
 async function invokeWorker(
@@ -396,6 +430,82 @@ export async function getSupportedAgentTypes(
   }
 
   return agentTypes;
+}
+
+export async function getAgentShellModels(
+  agentType: string,
+  cwd: string,
+  signal?: AbortSignal,
+  limits: AgentShellLimits = DEFAULT_AGENT_SHELL_LIMITS,
+): Promise<string[]> {
+  const { exitCode, stdout, stderr } = await invokeWorker(
+    {
+      operation: "list_models",
+      agent_type: agentType,
+      cwd,
+    },
+    signal,
+    undefined,
+    limits,
+  );
+  const lines = stdout
+    .split(/\r?\n/)
+    .filter((line) => line.trim().length > 0);
+
+  if (lines.length !== 1) {
+    throw new Error("AgentShell worker returned invalid models");
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(lines[0]);
+  } catch {
+    throw new Error("AgentShell worker returned invalid models");
+  }
+
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed)
+  ) {
+    throw new Error("AgentShell worker returned invalid models");
+  }
+
+  const message = parsed as ModelsMessage;
+
+  if (message.kind === "fatal") {
+    if (isNonEmptyString(message.message)) {
+      throw new Error(message.message);
+    }
+
+    throw new Error("AgentShell worker returned an invalid model error");
+  }
+
+  if (exitCode !== 0) {
+    const diagnostic = stderr.trim();
+    const suffix = diagnostic ? `: ${diagnostic}` : "";
+
+    throw new Error(
+      `AgentShell worker exited with code ${exitCode}${suffix}`,
+    );
+  }
+
+  const models = message.models;
+
+  if (
+    message.kind !== "models" ||
+    !Array.isArray(models) ||
+    !models.every(isNonEmptyString)
+  ) {
+    throw new Error("AgentShell worker returned invalid models");
+  }
+
+  if (Buffer.byteLength(JSON.stringify(models)) > limits.maxOutputBytes) {
+    throw new Error(formatModelListLimitFailure(limits.maxOutputBytes));
+  }
+
+  return models;
 }
 
 export async function runAgentShell(

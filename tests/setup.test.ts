@@ -19,6 +19,10 @@ const scenarios = [
   ["installs the missing AgentShell runtime after confirmation", "install"],
   ["explains how to install uv when uv is missing", "missing-uv"],
   ["leaves the AgentShell runtime uninstalled when declined", "decline"],
+  [
+    "keeps subagent tools when the runtime predates model discovery",
+    "outdated",
+  ],
 ] as const;
 
 for (const [name, scenario] of scenarios) {

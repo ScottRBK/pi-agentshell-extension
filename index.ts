@@ -16,9 +16,11 @@ import {
 import type { AgentShellLimits } from "./limits.ts";
 import {
   AGENT_SHELL_PROJECT_DIRECTORY,
+  getAgentShellModels,
   getSupportedAgentTypes,
   isAgentShellRuntimeInstalled,
   runAgentShell,
+  supportsAgentShellModelDiscovery,
   type RunResult,
 } from "./runner.ts";
 
@@ -307,6 +309,56 @@ function registerJobMessageRenderer(pi: ExtensionAPI): void {
   );
 }
 
+function registerSubagentModelsTool(
+  pi: ExtensionAPI,
+  agentTypes: string[],
+  limits: AgentShellLimits,
+): void {
+  pi.registerTool({
+    name: "subagent_list_models",
+    label: "List subagent models",
+    description: [
+      "List the exact model selectors advertised by an AgentShell agent.",
+      "Pass a returned selector unchanged to the subagent tool's model parameter.",
+      "An empty list is valid and does not prove a model can run.",
+    ].join(" "),
+    parameters: Type.Object({
+      agent_type: StringEnum(agentTypes, {
+        description: "AgentShell agent type to inspect",
+      }),
+      cwd: Type.Optional(Type.String({
+        minLength: 1,
+        description:
+          "Working directory used for workspace-aware discovery. " +
+          "Defaults to Pi's current working directory.",
+      })),
+    }),
+
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      const models = await getAgentShellModels(
+        params.agent_type,
+        params.cwd ?? ctx.cwd,
+        signal,
+        limits,
+      );
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify(models),
+        }],
+        details: {
+          status: "ok" as const,
+          agentType: params.agent_type,
+          models,
+          outputTokens: 0,
+          warnings: [] as string[],
+        },
+      };
+    },
+  });
+}
+
 async function registerSubagentTool(
   pi: ExtensionAPI,
   limits: AgentShellLimits,
@@ -314,6 +366,7 @@ async function registerSubagentTool(
   deliveries: Map<string, TerminalJobStatus>,
   isSilentMode: () => boolean,
   isShuttingDown: () => boolean,
+  modelDiscoverySupported: boolean,
 ): Promise<void> {
   const agentTypes = await getSupportedAgentTypes(limits);
 
@@ -490,6 +543,10 @@ async function registerSubagentTool(
     },
   });
 
+  if (modelDiscoverySupported) {
+    registerSubagentModelsTool(pi, agentTypes, limits);
+  }
+
   pi.registerTool({
     name: "subagent_cancel",
     label: "Cancel subagent",
@@ -635,10 +692,30 @@ export default async function subagentsExtension(
       deliveries,
       () => silentMode,
       () => shuttingDown,
+      supportsAgentShellModelDiscovery(),
     );
 
   if (isAgentShellRuntimeInstalled()) {
+    const modelDiscoverySupported = supportsAgentShellModelDiscovery();
     await registerTool();
+
+    if (!modelDiscoverySupported) {
+      pi.on("session_start", (_event, ctx) => {
+        if (!ctx.hasUI) {
+          return;
+        }
+
+        ctx.ui.notify(
+          [
+            "Model discovery needs an updated AgentShell runtime.",
+            `Run: ${setupCommand()}`,
+            "Then restart Pi or run /reload.",
+          ].join("\n"),
+          "warning",
+        );
+      });
+    }
+
     return;
   }
 

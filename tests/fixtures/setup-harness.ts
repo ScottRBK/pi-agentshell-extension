@@ -15,7 +15,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const PYTHON_PROJECT = join(ROOT, "python");
 const RUNTIME_PYTHON = join(PYTHON_PROJECT, ".venv", "bin", "python");
 
-type Scenario = "install" | "missing-uv" | "decline";
+type Scenario = "install" | "missing-uv" | "decline" | "outdated";
 type NotificationType = "info" | "warning" | "error";
 
 interface CapturedTool {
@@ -59,15 +59,19 @@ function result(code: number, stderr = ""): ExecResult {
   };
 }
 
-function installFakeRuntime(): void {
+function installFakeRuntime(outdated = false): void {
   const realPython = process.env.REAL_AGENT_SHELL_PYTHON;
   assert.ok(realPython, "REAL_AGENT_SHELL_PYTHON is required");
   assert.ok(!realPython.includes("'"), "test Python path cannot contain a quote");
 
   mkdirSync(dirname(RUNTIME_PYTHON), { recursive: true });
+  const capabilityCheck = outdated
+    ? "if [ \"$2\" = \"-c\" ]; then exit 1; fi\n"
+    : "";
+
   writeFileSync(
     RUNTIME_PYTHON,
-    `#!/bin/sh\nexec '${realPython}' "$@"\n`,
+    `#!/bin/sh\n${capabilityCheck}exec '${realPython}' "$@"\n`,
     "utf8",
   );
   chmodSync(RUNTIME_PYTHON, 0o755);
@@ -78,7 +82,8 @@ export default async function setupHarness(): Promise<void> {
   assert.ok(
     scenario === "install" ||
       scenario === "missing-uv" ||
-      scenario === "decline",
+      scenario === "decline" ||
+      scenario === "outdated",
     `unsupported setup scenario: ${scenario}`,
   );
 
@@ -125,9 +130,13 @@ export default async function setupHarness(): Promise<void> {
     },
   } as unknown as ExtensionAPI;
 
+  if (scenario === "outdated") {
+    installFakeRuntime(true);
+  }
+
   await subagentsExtension(fakePi);
 
-  assert.equal(tools.length, 0);
+  assert.equal(tools.length, scenario === "outdated" ? 2 : 0);
   assert.equal(sessionStarts.length, 2);
 
   const context: SetupContext = {
@@ -158,10 +167,22 @@ export default async function setupHarness(): Promise<void> {
   if (scenario === "install") {
     assert.equal(confirmCalls, 1);
     assert.equal(execCalls.length, 2);
-    assert.equal(tools.length, 2);
+    assert.equal(tools.length, 3);
     assert.ok(tools.some(({ name }) => name === "subagent"));
+    assert.ok(tools.some(({ name }) => name === "subagent_list_models"));
     assert.ok(tools.some(({ name }) => name === "subagent_cancel"));
     assert.ok(notifications.some(({ message }) => /ready/.test(message)));
+  } else if (scenario === "outdated") {
+    assert.equal(confirmCalls, 0);
+    assert.equal(execCalls.length, 0);
+    assert.ok(tools.some(({ name }) => name === "subagent"));
+    assert.ok(tools.some(({ name }) => name === "subagent_cancel"));
+    assert.ok(!tools.some(({ name }) => name === "subagent_list_models"));
+    assert.ok(
+      notifications.some(({ message, type }) =>
+        type === "warning" && /model discovery needs/i.test(message)
+      ),
+    );
   } else if (scenario === "missing-uv") {
     assert.equal(confirmCalls, 0);
     assert.equal(execCalls.length, 1);

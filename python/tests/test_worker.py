@@ -1,5 +1,6 @@
 import tempfile
 import os
+import importlib.metadata
 import json
 import subprocess
 import sys
@@ -13,6 +14,12 @@ WORKER = PYTHON_DIR / "worker.py"
 FAKE_BIN = PYTHON_DIR / "tests" / "fixtures" / "bin"
 
 class WorkerProtocolTest(unittest.TestCase):
+    def test_uses_the_guardian_cleanup_agent_shell_release(self) -> None:
+       self.assertEqual(
+           importlib.metadata.version("agent-shell-py"),
+           "0.2.2",
+       )
+
     def test_lists_agent_types_from_agent_shell(self) -> None:
        completed, messages = self.run_worker({
            "operation": "list_agent_types",
@@ -32,6 +39,28 @@ class WorkerProtocolTest(unittest.TestCase):
                        agent_type.value
                        for agent_type in AgentType
                    ],
+               },
+           ],
+       )
+
+    def test_lists_advertised_models_from_agent_shell(self) -> None:
+       completed, messages = self.run_worker({
+           "operation": "list_models",
+           "agent_type": "codex",
+           "cwd": str(PYTHON_DIR),
+       })
+
+       self.assertEqual(
+           completed.returncode,
+           0,
+           f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+       )
+       self.assertEqual(
+           messages,
+           [
+               {
+                   "kind": "models",
+                   "models": ["gpt-5", "gpt-5-codex"],
                },
            ],
        )

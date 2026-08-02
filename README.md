@@ -66,6 +66,23 @@ The tool accepts the following parameters:
 
 AgentShell warnings are included in the completion message when an agent cannot enforce a control.
 
+### Discovering Models
+
+Use `subagent_list_models` to find the exact model selectors currently advertised for an agent:
+
+```text
+subagent_list_models({
+  agent_type: "codex",
+  cwd: "/path/to/project"
+})
+```
+
+`cwd` is optional and defaults to Pi's current working directory. The tool returns a JSON array;
+pass a returned string unchanged as `subagent`'s `model` value. The list is account- and
+workspace-aware, but it does not prove that a model has credentials, quota, or provider health.
+An empty array is a valid result. If an existing runtime predates model discovery, the normal
+`subagent` tools remain available and Pi explains how to update the runtime.
+
 ### Asynchronous Jobs
 
 The `subagent` tool returns immediately with a session-scoped Job ID. The parent agent and user can
@@ -135,8 +152,8 @@ The extension stops a subagent if any of these limits are exceeded:
 | `maxMessageBytes` | 256 KiB | One message sent by the AgentShell worker. |
 | `maxStderrBytes` | 256 KiB | Diagnostic output from the AgentShell worker. |
 
-When text output exceeds its limit, the failed completion message includes a UTF-8-safe truncated
-prefix.
+When subagent text output exceeds its limit, the failed completion message includes a UTF-8-safe
+truncated prefix. A model list that exceeds `maxOutputBytes` is not returned.
 
 To override the defaults, create `~/.pi/agent/extensions/agentshell.json`:
 

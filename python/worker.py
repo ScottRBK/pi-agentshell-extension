@@ -26,6 +26,22 @@ async def main() -> int:
         })
         return 0
 
+    if request.get("operation") == "list_models":
+        raw_agent_type = require_string(request, "agent_type")
+        cwd = require_string(request, "cwd")
+
+        try:
+            agent_type = AgentType(raw_agent_type)
+            shell = AgentShell(agent_type=agent_type)
+        except(TypeError, ValueError):
+            raise ValueError(f"unsupported agent type: {raw_agent_type}")
+
+        emit({
+            "kind": "models",
+            "models": await shell.list_models(cwd=cwd),
+        })
+        return 0
+
     raw_agent_type = require_string(request, "agent_type")
     cwd = require_string(request, "cwd")
     prompt = require_string(request, "prompt")

@@ -1,5 +1,31 @@
 #!/bin/sh
 
+if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+   if [ -n "$FAKE_CODEX_CWD_FILE" ]; then
+      pwd > "$FAKE_CODEX_CWD_FILE"
+   fi
+
+   if [ -n "$FAKE_CODEX_STARTED_FILE" ]; then
+      printf 'started\n' > "$FAKE_CODEX_STARTED_FILE"
+   fi
+
+   if [ -n "$FAKE_CODEX_DELAY_SECONDS" ]; then
+      /bin/sleep "$FAKE_CODEX_DELAY_SECONDS"
+   fi
+
+   if [ "$FAKE_CODEX_NO_MODELS" = "1" ]; then
+      echo '{"models":[]}'
+   else
+      printf '%s\n' \
+         '{"models":[' \
+         '  {"visibility":"list","slug":"gpt-5"},' \
+         '  {"visibility":"list","slug":"gpt-5-codex"},' \
+         '  {"visibility":"hidden","slug":"internal"}' \
+         ']}'
+   fi
+   exit 0
+fi
+
 if [ -n "$FAKE_CODEX_ARGS_FILE" ]; then
    printf '%s\n' "$@" > "$FAKE_CODEX_ARGS_FILE"
 fi

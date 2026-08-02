@@ -25,6 +25,7 @@ interface CapturedResult {
     status: string;
     jobId?: string;
     sessionId?: string;
+    models?: string[];
     outputTokens: number;
     warnings: string[];
   };
@@ -261,7 +262,7 @@ export default async function indexHarness(): Promise<void> {
 
   await subagentsExtension(fakePi);
 
-  assert.equal(tools.length, 2);
+  assert.equal(tools.length, 3);
   assert.equal(
     shutdownHandlers.length,
     1,
@@ -270,8 +271,12 @@ export default async function indexHarness(): Promise<void> {
 
   const tool = tools.find(({ name }) => name === "subagent");
   const cancelTool = tools.find(({ name }) => name === "subagent_cancel");
+  const modelsTool = tools.find(
+    ({ name }) => name === "subagent_list_models",
+  );
   assert.ok(tool);
   assert.ok(cancelTool);
+  assert.ok(modelsTool);
 
   const widgets: CapturedWidget[] = [];
   const theme: CapturedTheme = {
@@ -312,6 +317,8 @@ export default async function indexHarness(): Promise<void> {
   assert.deepEqual(cancelTool.parameters.required, ["job_id"]);
   assert.equal(cancelTool.parameters.properties?.job_id?.type, "string");
   assert.equal(cancelTool.parameters.properties?.job_id?.minLength, 1);
+  assert.deepEqual(modelsTool.parameters.required, ["agent_type"]);
+  assert.equal(modelsTool.parameters.properties?.cwd?.type, "string");
 
   if (process.env.INDEX_LIMIT_TEST === "1") {
     const previousPath = process.env.PATH;
@@ -399,6 +406,10 @@ export default async function indexHarness(): Promise<void> {
   assert.ok(agentTypes.length > 0);
   assert.ok(agentTypes.includes("codex"));
   assert.equal(new Set(agentTypes).size, agentTypes.length);
+  assert.deepEqual(
+    modelsTool.parameters.properties?.agent_type?.enum,
+    agentTypes,
+  );
 
   const renderCall = tool.renderCall;
   assert.ok(renderCall);
@@ -448,6 +459,39 @@ export default async function indexHarness(): Promise<void> {
   process.env.FAKE_CODEX_CWD_FILE = cwdFile;
 
   try {
+    const defaultModels = await modelsTool.execute(
+      "index-test-list-default-models",
+      { agent_type: "codex" },
+      undefined,
+      undefined,
+      toolContext,
+    );
+
+    assert.deepEqual(defaultModels.details.models, [
+      "gpt-5",
+      "gpt-5-codex",
+    ]);
+    assert.equal(
+      defaultModels.content[0]?.text,
+      "[\"gpt-5\",\"gpt-5-codex\"]",
+    );
+    assert.equal(readFileSync(cwdFile, "utf8").trim(), PYTHON_DIR);
+
+    const overriddenModels = await modelsTool.execute(
+      "index-test-list-overridden-models",
+      { agent_type: "codex", cwd: overriddenCwd },
+      undefined,
+      undefined,
+      toolContext,
+    );
+
+    assert.deepEqual(overriddenModels.details.models, [
+      "gpt-5",
+      "gpt-5-codex",
+    ]);
+    assert.equal(readFileSync(cwdFile, "utf8").trim(), overriddenCwd);
+    rmSync(cwdFile);
+
     const updates: CapturedResult[] = [];
     const notifications: Array<{ message: string; type: string }> = [];
     const commandContext: CommandContext = {
