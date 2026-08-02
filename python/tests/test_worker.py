@@ -259,7 +259,7 @@ class WorkerProtocolTest(unittest.TestCase):
            ],
        )
 
-    def tests_enables_auto_approval_when_explicitly_requested(self) -> None:
+    def test_enables_auto_approval_when_explicitly_requested(self) -> None:
         request = {
             "agent_type": "codex",
             "cwd": str(PYTHON_DIR),
