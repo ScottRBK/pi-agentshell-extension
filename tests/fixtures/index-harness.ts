@@ -201,6 +201,17 @@ async function waitFor(
   }
 }
 
+function countFileLines(path: string): number {
+  if (!existsSync(path)) {
+    return 0;
+  }
+
+  return readFileSync(path, "utf8")
+    .split(/\r?\n/)
+    .filter((line) => line.length > 0)
+    .length;
+}
+
 function assertRunningJob(result: CapturedResult): string {
   assert.equal(result.details.status, "running");
   assert.match(
@@ -861,7 +872,10 @@ export default async function indexHarness(): Promise<void> {
       ],
       options: { placement: "aboveEditor" },
     });
-    await waitForFile(startedFile);
+    await waitFor(
+      () => countFileLines(startedFile) === overflowJobIds.length,
+      "all overflow AgentShell workers to start",
+    );
     await cancelTool.execute(
       "index-test-overflow-cancel-1",
       { job_id: overflowJobIds[0] },
