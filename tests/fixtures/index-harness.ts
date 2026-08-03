@@ -740,6 +740,16 @@ export default async function indexHarness(): Promise<void> {
 
     const cancelledJobId = assertRunningJob(cancelledResult);
     await waitForFile(startedFile);
+    await assert.rejects(
+      cancelTool.execute(
+        "index-test-agent-cancel-mistyped",
+        { job_id: "job-mistyped" },
+        undefined,
+        undefined,
+        toolContext,
+      ),
+      new RegExp(cancelledJobId),
+    );
     const cancellation = await cancelTool.execute(
       "index-test-agent-cancel",
       { job_id: cancelledJobId },
@@ -809,6 +819,12 @@ export default async function indexHarness(): Promise<void> {
     );
     const commandCancelledJobId = assertRunningJob(commandCancelledResult);
     await waitForFile(startedFile);
+    await cancelCommand.handler("job-mistyped", commandContext);
+    assert.equal(notifications.at(-1)?.type, "warning");
+    assert.match(
+      notifications.at(-1)?.message ?? "",
+      new RegExp(commandCancelledJobId),
+    );
     await cancelCommand.handler(commandCancelledJobId, commandContext);
     assert.equal(notifications.at(-1)?.type, "info");
     assert.match(notifications.at(-1)?.message ?? "", /cancelled/i);
@@ -875,6 +891,24 @@ export default async function indexHarness(): Promise<void> {
     await waitFor(
       () => countFileLines(startedFile) === overflowJobIds.length,
       "all overflow AgentShell workers to start",
+    );
+    await assert.rejects(
+      cancelTool.execute(
+        "index-test-overflow-cancel-mistyped",
+        { job_id: "job-mistyped" },
+        undefined,
+        undefined,
+        toolContext,
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+
+        for (const jobId of overflowJobIds) {
+          assert.match(error.message, new RegExp(jobId));
+        }
+
+        return true;
+      },
     );
     await cancelTool.execute(
       "index-test-overflow-cancel-1",

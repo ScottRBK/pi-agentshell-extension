@@ -131,6 +131,23 @@ function formatJobListEntry(
   return `${job.id}: ${status}\n  ${details}`;
 }
 
+function formatCancellationFailure(
+  jobId: string,
+  jobs: JobRegistry,
+): string {
+  const runningJobIds = jobs.list()
+    .filter((job) => job.status === "running")
+    .map((job) => `- ${job.id}`);
+  const runningJobs = runningJobIds.length === 0
+    ? "No subagent jobs are currently running."
+    : ["Running subagent jobs:", ...runningJobIds].join("\n");
+
+  return [
+    `No running subagent job found with ID ${jobId}.`,
+    runningJobs,
+  ].join("\n\n");
+}
+
 function updateJobWidget(
   ctx: Pick<ExtensionContext, "hasUI" | "ui">,
   jobs: JobRegistry,
@@ -560,9 +577,7 @@ async function registerSubagentTool(
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (!jobs.cancel(params.job_id)) {
-        throw new Error(
-          `No running subagent job found with ID ${params.job_id}.`,
-        );
+        throw new Error(formatCancellationFailure(params.job_id, jobs));
       }
 
       updateJobWidget(ctx, jobs, deliveries);
@@ -677,7 +692,7 @@ export default async function subagentsExtension(
       ctx.ui.notify(
         cancelled
           ? `Subagent job ${jobId} cancelled.`
-          : `No running subagent job found with ID ${jobId}.`,
+          : formatCancellationFailure(jobId, jobs),
         cancelled ? "info" : "warning",
       );
     },
