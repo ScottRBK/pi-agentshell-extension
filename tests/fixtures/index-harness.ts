@@ -131,6 +131,13 @@ interface CapturedTool {
         type?: string;
         minLength?: number;
       };
+      resume_session_id?: {
+        anyOf?: Array<{
+          type?: string;
+          minLength?: number;
+        }>;
+        description?: string;
+      };
       session_id?: {
         type?: string;
         minLength?: number;
@@ -317,6 +324,22 @@ export default async function indexHarness(): Promise<void> {
   assert.match(tool.description, /automatically delivers.*follow-up turn/i);
   assert.match(tool.description, /Continue other work or remain idle/i);
   assert.match(tool.description, /resumable session ID.*completion result/i);
+  assert.match(
+    tool.description,
+    /Omit `resume_session_id` for a new session/i,
+  );
+  assert.match(
+    tool.description,
+    /tool-call interface requires.*property.*use `null`/i,
+  );
+  assert.match(
+    tool.description,
+    /earlier successful subagent result/i,
+  );
+  assert.match(
+    tool.description,
+    /Do not pass `new`, a background Job ID, or a newly generated UUID/i,
+  );
   assert.deepEqual(tool.parameters.required, [
     "agent_type",
     "task_name",
@@ -388,8 +411,30 @@ export default async function indexHarness(): Promise<void> {
   assert.equal(tool.parameters.properties?.model?.minLength, 1);
   assert.equal(tool.parameters.properties?.effort?.type, "string");
   assert.equal(tool.parameters.properties?.effort?.minLength, 1);
-  assert.equal(tool.parameters.properties?.session_id?.type, "string");
-  assert.equal(tool.parameters.properties?.session_id?.minLength, 1);
+  const resumeSessionSchema =
+    tool.parameters.properties?.resume_session_id;
+  assert.deepEqual(
+    resumeSessionSchema?.anyOf?.map(({ type }) => type),
+    ["string", "null"],
+  );
+  assert.equal(resumeSessionSchema?.anyOf?.[0]?.minLength, 1);
+  assert.equal(tool.parameters.properties?.session_id, undefined);
+  assert.match(
+    resumeSessionSchema?.description ?? "",
+    /omit `resume_session_id` for a new session/i,
+  );
+  assert.match(
+    resumeSessionSchema?.description ?? "",
+    /tool-call interface requires.*property.*use `null`/i,
+  );
+  assert.match(
+    resumeSessionSchema?.description ?? "",
+    /earlier successful subagent result/i,
+  );
+  assert.match(
+    resumeSessionSchema?.description ?? "",
+    /Do not pass `new`, a background Job ID, or a newly generated UUID/i,
+  );
   assert.equal(tool.parameters.properties?.auto_approve?.type, "boolean");
   assert.equal(tool.parameters.properties?.allowed_tools?.type, "array");
   assert.equal(tool.parameters.properties?.allowed_tools?.minItems, 1);
@@ -555,6 +600,9 @@ export default async function indexHarness(): Promise<void> {
       readFileSync(cwdFile, "utf8").trim(),
       PYTHON_DIR,
     );
+    const freshArguments = readFileSync(argumentsFile, "utf8")
+      .split(/\r?\n/);
+    assert.ok(!freshArguments.includes("resume"));
 
     await jobsCommand.handler("", commandContext);
     assert.equal(
@@ -679,7 +727,7 @@ export default async function indexHarness(): Promise<void> {
         agent_type: "codex",
         task_name: "Resume task",
         prompt: "Continue the task",
-        session_id: "existing-session",
+        resume_session_id: "existing-session",
       },
       undefined,
       undefined,

@@ -30,6 +30,13 @@ const OUTPUT_MODE_ENTRY_TYPE = "agentshell-output-mode";
 const JOB_RESULT_MESSAGE_TYPE = "agentshell-job-result";
 const JOB_WIDGET_KEY = "agentshell-jobs";
 const JOB_WIDGET_OPTIONS = { placement: "aboveEditor" as const };
+const RESUME_SESSION_GUIDANCE = [
+  "Omit `resume_session_id` for a new session.",
+  "If the tool-call interface requires this property, use `null` for a new session.",
+  "For a resumed session, the value must come from an earlier successful " +
+    "subagent result.",
+  "Do not pass `new`, a background Job ID, or a newly generated UUID.",
+].join(" ");
 
 type TerminalJobStatus = Exclude<JobStatus, "running">;
 
@@ -400,6 +407,7 @@ async function registerSubagentTool(
       "The extension automatically delivers the result using a follow-up turn.",
       "Continue other work or remain idle until notified.",
       "The real resumable session ID arrives with the completion result.",
+      RESUME_SESSION_GUIDANCE,
     ].join(" "),
     parameters: Type.Object({
       agent_type: StringEnum(agentTypes, {
@@ -429,12 +437,13 @@ async function registerSubagentTool(
         minLength: 1,
         description: "Reasoning effort passed to AgentShell",
       })),
-      session_id: Type.Optional(Type.String({
-        minLength: 1,
-        description:
-          "Session ID of an earlier subagent call to resume, " +
-          "as reported by that call.",
-      })),
+      resume_session_id: Type.Optional(Type.Union(
+        [
+          Type.String({ minLength: 1 }),
+          Type.Null(),
+        ],
+        { description: RESUME_SESSION_GUIDANCE },
+      )),
       auto_approve: Type.Optional(Type.Boolean({
         description:
           "Allow the subagent to approve tool use automatically. " +
@@ -495,7 +504,7 @@ async function registerSubagentTool(
               prompt: params.prompt,
               model: params.model,
               effort: params.effort,
-              session_id: params.session_id,
+              session_id: params.resume_session_id ?? undefined,
               auto_approve: params.auto_approve,
               allowed_tools: params.allowed_tools,
               disallowed_tools: params.disallowed_tools,
