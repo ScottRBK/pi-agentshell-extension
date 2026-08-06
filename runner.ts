@@ -608,7 +608,9 @@ export async function runAgentShell(
     limits,
   );
 
-  if (failureReasons.length > 0) {
+  const runSucceeded = status === "ok" && exitCode === 0;
+
+  if (!runSucceeded && failureReasons.length > 0) {
     throw new Error(formatFailure(
       formatFailureReasons(failureReasons),
       output,

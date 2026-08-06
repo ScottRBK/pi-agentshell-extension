@@ -510,6 +510,7 @@ export default async function indexHarness(): Promise<void> {
   const previousStartedFile = process.env.FAKE_CODEX_STARTED_FILE;
   const previousDelay = process.env.FAKE_CODEX_DELAY_SECONDS;
   const previousError = process.env.FAKE_CODEX_ERROR;
+  const previousRecoveredPiError = process.env.FAKE_PI_RECOVERED_ERROR;
   process.env.PATH = FAKE_BIN;
   process.env.FAKE_CODEX_ARGS_FILE = argumentsFile;
   process.env.FAKE_CODEX_CWD_FILE = cwdFile;
@@ -768,6 +769,36 @@ export default async function indexHarness(): Promise<void> {
     assert.equal(sentMessages.at(-1)?.message.details?.status, "failed");
     delete process.env.FAKE_CODEX_ERROR;
 
+    process.env.FAKE_PI_RECOVERED_ERROR = "1";
+    const recoveredResult = await tool.execute(
+      "index-test-recovered-pi",
+      {
+        agent_type: "pi",
+        task_name: "Recovered Pi",
+        prompt: "Recover from a transient transport error",
+      },
+      undefined,
+      undefined,
+      toolContext,
+    );
+    assertRunningJob(recoveredResult);
+    await waitFor(
+      () => sentMessages.length === 6,
+      "the recovered Pi completion",
+    );
+    const recoveredMessage = sentMessages.at(-1)?.message;
+    assert.equal(recoveredMessage?.details?.status, "completed");
+    assert.match(recoveredMessage?.content ?? "", /recovered pi response/);
+    assert.match(
+      recoveredMessage?.content ?? "",
+      /Session ID: pi-recovered-session/,
+    );
+    assert.doesNotMatch(
+      recoveredMessage?.content ?? "",
+      /transient transport error/,
+    );
+    delete process.env.FAKE_PI_RECOVERED_ERROR;
+
     await jobsCommand.handler("", commandContext);
     assert.match(notifications.at(-1)?.message ?? "", /no .*jobs/i);
 
@@ -839,7 +870,7 @@ export default async function indexHarness(): Promise<void> {
       /No running subagent job found/,
     );
     await waitFor(
-      () => sentMessages.length === 6,
+      () => sentMessages.length === 7,
       "the cancelled AgentShell completion",
     );
     assert.match(sentMessages.at(-1)?.message.content ?? "", /cancelled|aborted/i);
@@ -889,7 +920,7 @@ export default async function indexHarness(): Promise<void> {
       options: { placement: "aboveEditor" },
     });
     await waitFor(
-      () => sentMessages.length === 7,
+      () => sentMessages.length === 8,
       "the slash-command cancelled AgentShell completion",
     );
     assert.equal(sentMessages.at(-1)?.message.details?.status, "cancelled");
@@ -1096,6 +1127,12 @@ export default async function indexHarness(): Promise<void> {
       delete process.env.FAKE_CODEX_ERROR;
     } else {
       process.env.FAKE_CODEX_ERROR = previousError;
+    }
+
+    if (previousRecoveredPiError === undefined) {
+      delete process.env.FAKE_PI_RECOVERED_ERROR;
+    } else {
+      process.env.FAKE_PI_RECOVERED_ERROR = previousRecoveredPiError;
     }
 
     rmSync(temporaryDirectory, { recursive: true, force: true });

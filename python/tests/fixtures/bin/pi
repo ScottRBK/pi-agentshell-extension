@@ -1,5 +1,43 @@
 #!/bin/sh
 
+if [ "$FAKE_PI_PROCESS_ERROR_AFTER_SUCCESS" = "1" ]; then
+   echo '{"type":"session","id":"pi-process-error-session"}'
+   printf '%s' \
+      '{"type":"message_update","assistantMessageEvent":{' \
+      '"type":"text_end","content":"apparently complete"}}'
+   printf '\n'
+   printf '%s' \
+      '{"type":"agent_end","messages":[{' \
+      '"role":"assistant","provider":"test",' \
+      '"model":"test-model","stopReason":"stop",' \
+      '"usage":{"output":2,"cost":{"total":0}}}]}'
+   printf '\n'
+   printf 'pi process failed\n' >&2
+   exit 1
+fi
+
+if [ "$FAKE_PI_RECOVERED_ERROR" = "1" ]; then
+   echo '{"type":"session","id":"pi-recovered-session"}'
+   printf '%s' \
+      '{"type":"agent_end","messages":[{' \
+      '"role":"assistant","provider":"test",' \
+      '"model":"test-model","stopReason":"error",' \
+      '"errorMessage":"transient transport error",' \
+      '"usage":{"output":1,"cost":{"total":0}}}],"willRetry":true}'
+   printf '\n'
+   printf '%s' \
+      '{"type":"message_update","assistantMessageEvent":{' \
+      '"type":"text_end","content":"recovered pi response"}}'
+   printf '\n'
+   printf '%s' \
+      '{"type":"agent_end","messages":[{' \
+      '"role":"assistant","provider":"test",' \
+      '"model":"test-model","stopReason":"stop",' \
+      '"usage":{"output":5,"cost":{"total":0}}}],"willRetry":false}'
+   printf '\n'
+   exit 0
+fi
+
 echo '{"type":"session","id":"pi-failed-session"}'
 
 printf '%s' \

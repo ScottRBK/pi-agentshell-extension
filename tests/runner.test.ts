@@ -609,6 +609,86 @@ test("reports unsuccessful terminal results", { timeout: 5_000 }, async () => {
     }
 });
 
+test("accepts a Pi run that recovers from a failed attempt", {
+    timeout: 5_000,
+}, async () => {
+    const previousPath = process.env.PATH;
+    const previousRecoveredError = process.env.FAKE_PI_RECOVERED_ERROR;
+
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_PI_RECOVERED_ERROR = "1";
+
+    try {
+        const result = await runAgentShell({
+            agent_type: "pi",
+            cwd: PYTHON_DIR,
+            prompt: "Recover from a transient transport error",
+        });
+
+        assert.equal(result.output, "recovered pi response");
+        assert.deepEqual(result.details, {
+            status: "ok",
+            sessionId: "pi-recovered-session",
+            outputTokens: 5,
+            warnings: [],
+        });
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousRecoveredError === undefined) {
+            delete process.env.FAKE_PI_RECOVERED_ERROR;
+        } else {
+            process.env.FAKE_PI_RECOVERED_ERROR = previousRecoveredError;
+        }
+    }
+});
+
+test("rejects a real process error after an ok Pi result", {
+    timeout: 5_000,
+}, async () => {
+    const previousPath = process.env.PATH;
+    const previousProcessError =
+        process.env.FAKE_PI_PROCESS_ERROR_AFTER_SUCCESS;
+
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_PI_PROCESS_ERROR_AFTER_SUCCESS = "1";
+
+    try {
+        await assert.rejects(
+            runAgentShell({
+                agent_type: "pi",
+                cwd: PYTHON_DIR,
+                prompt: "Report a process error after an ok result",
+            }),
+            {
+                message: [
+                    "pi process failed",
+                    "",
+                    "Partial output:",
+                    "apparently complete",
+                ].join("\n"),
+            },
+        );
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousProcessError === undefined) {
+            delete process.env.FAKE_PI_PROCESS_ERROR_AFTER_SUCCESS;
+        } else {
+            process.env.FAKE_PI_PROCESS_ERROR_AFTER_SUCCESS =
+                previousProcessError;
+        }
+    }
+});
+
 test("reports terminal failure reasons with partial output", {
     timeout: 5_000,
 }, async () => {
