@@ -3,7 +3,7 @@
 A [Pi](https://github.com/earendil-works/pi) extension for delegating tasks to other coding
 harnesses, including Pi, through [AgentShell](https://github.com/ScottRBK/agent-shell).
 
-[![AgentShell demo](docs/assets/demo.gif)](docs/assets/demo.mp4)
+![AgentShell demo](docs/assets/demo.gif)
 
 ## Architecture
 
