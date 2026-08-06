@@ -72,7 +72,7 @@ function formatJobLaunch(jobId: string) {
     content: [
       {
         type: "text" as const,
-        text: `Subagent job ${jobId} is running.`,
+        text: `Subagent job ${jobId} started.`,
       },
     ],
     details: {
@@ -402,7 +402,7 @@ async function registerSubagentTool(
     label: "Subagent",
     description: [
       "Delegate a task to an AI coding agent in a separate context.",
-      "Long-running subagent calls may return `Subagent job <job-id> is running`.",
+      "Long-running subagent calls may return `Subagent job <job-id> started`.",
       "Do not poll the process or run sleep commands. A Job ID is not a session ID.",
       "The extension automatically delivers the result using a follow-up turn.",
       "Continue other work or remain idle until notified.",
