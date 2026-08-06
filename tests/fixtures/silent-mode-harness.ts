@@ -153,7 +153,10 @@ function assertRunningJob(result: CapturedResult): void {
     result.details.jobId ?? "",
     /^job-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
   );
-  assert.match(result.content[0]?.text ?? "", /running/i);
+  assert.equal(
+    result.content[0]?.text,
+    `Subagent job ${result.details.jobId} started.`,
+  );
 }
 
 export default async function silentModeHarness(): Promise<void> {
