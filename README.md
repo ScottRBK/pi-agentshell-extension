@@ -5,9 +5,9 @@ harnesses, including Pi, through [AgentShell](https://github.com/ScottRBK/agent-
 
 ## Demo
 
-<video src="docs/assets/demo.mp4" controls></video>
+[![AgentShell demo](docs/assets/demo.gif)](docs/assets/demo.mp4)
 
-[Watch the demo video](docs/assets/demo.mp4).
+Click the preview to watch the full-quality video.
 
 ## Architecture
 
