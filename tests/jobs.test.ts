@@ -63,6 +63,107 @@ test("keeps display metadata in job snapshots", async () => {
   await job.completion;
 });
 
+test("keeps a bounded rolling activity tail for a running job", async () => {
+  // Arrange
+  const registry = new JobRegistry(8);
+  const work = Promise.withResolvers<void>();
+  const job = registry.start(() => work.promise);
+
+  // Act
+  registry.recordActivity(job.id, {
+    type: "tool_use",
+    content: "1234",
+  });
+  registry.recordActivity(job.id, {
+    type: "text",
+    content: "5678",
+  });
+  registry.recordActivity(job.id, {
+    type: "tool_use",
+    content: "90",
+  });
+
+  // Assert
+  assert.deepEqual(registry.get(job.id)?.activity, [
+    { type: "text", content: "5678" },
+    { type: "tool_use", content: "90" },
+  ]);
+  assert.deepEqual(registry.get(job.id)?.latestActivity, {
+    type: "tool_use",
+    content: "90",
+  });
+  work.resolve();
+  await job.completion;
+});
+
+test("keeps concurrent job activity isolated by job ID", async () => {
+  // Arrange
+  const registry = new JobRegistry();
+  const work = Promise.withResolvers<void>();
+  const first = registry.start(() => work.promise);
+  const second = registry.start(() => work.promise);
+
+  // Act
+  registry.recordActivity(first.id, {
+    type: "tool_use",
+    content: "npm test",
+  });
+  registry.recordActivity(second.id, {
+    type: "tool_use",
+    content: "git status",
+  });
+
+  // Assert
+  assert.deepEqual(registry.get(first.id)?.activity, [
+    { type: "tool_use", content: "npm test" },
+  ]);
+  assert.deepEqual(registry.get(second.id)?.activity, [
+    { type: "tool_use", content: "git status" },
+  ]);
+  work.resolve();
+  await Promise.all([first.completion, second.completion]);
+});
+
+test("truncates one oversized activity entry at a UTF-8 boundary", async () => {
+  // Arrange
+  const registry = new JobRegistry(5);
+  const work = Promise.withResolvers<void>();
+  const job = registry.start(() => work.promise);
+
+  // Act
+  const recorded = registry.recordActivity(job.id, {
+    type: "text",
+    content: "ab🙂cd",
+  });
+
+  // Assert
+  assert.equal(recorded, true);
+  assert.deepEqual(registry.get(job.id)?.activity, [
+    { type: "text", content: "ab" },
+  ]);
+  work.resolve();
+  await job.completion;
+});
+
+test("does not retain a partial UTF-8 activity character", async () => {
+  // Arrange
+  const registry = new JobRegistry(1);
+  const work = Promise.withResolvers<void>();
+  const job = registry.start(() => work.promise);
+
+  // Act
+  const recorded = registry.recordActivity(job.id, {
+    type: "tool_use",
+    content: "🙂",
+  });
+
+  // Assert
+  assert.equal(recorded, false);
+  assert.equal(registry.get(job.id)?.activity, undefined);
+  work.resolve();
+  await job.completion;
+});
+
 test("marks a successful job as completed", async () => {
   // Arrange
   const registry = new JobRegistry();

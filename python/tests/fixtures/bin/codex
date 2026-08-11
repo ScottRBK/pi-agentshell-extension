@@ -45,9 +45,26 @@ fi
 response=${FAKE_CODEX_RESPONSE:-test response}
 
 echo '{"type":"thread.started","thread_id":"test-session"}'
-printf \
-   '{"type":"item.completed","item":{"type":"agent_message","text":"%s"}}\n' \
-   "$response"
+
+if [ -n "$FAKE_CODEX_TOOL_COMMAND" ]; then
+   printf \
+      '{"type":"item.completed","item":{"type":"command_execution","command":"%s"}}\n' \
+      "$FAKE_CODEX_TOOL_COMMAND"
+fi
+
+if [ -n "$FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS" ]; then
+   /bin/sleep "$FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS"
+fi
+
+if [ -n "$FAKE_CODEX_RESPONSE_JSON" ]; then
+   printf \
+      '{"type":"item.completed","item":{"type":"agent_message","text":%s}}\n' \
+      "$FAKE_CODEX_RESPONSE_JSON"
+else
+   printf \
+      '{"type":"item.completed","item":{"type":"agent_message","text":"%s"}}\n' \
+      "$response"
+fi
 
 if [ -n "$FAKE_CODEX_RESULT_DELAY_SECONDS" ]; then
    /bin/sleep "$FAKE_CODEX_RESULT_DELAY_SECONDS"

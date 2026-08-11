@@ -10,6 +10,7 @@ import { Type } from "typebox";
 import { loadAgentShellLimits } from "./config.ts";
 import {
   JobRegistry,
+  type JobActivity,
   type JobSnapshot,
   type JobStatus,
 } from "./jobs.ts";
@@ -30,6 +31,9 @@ const OUTPUT_MODE_ENTRY_TYPE = "agentshell-output-mode";
 const JOB_RESULT_MESSAGE_TYPE = "agentshell-job-result";
 const JOB_WIDGET_KEY = "agentshell-jobs";
 const JOB_WIDGET_OPTIONS = { placement: "aboveEditor" as const };
+const MAX_WIDGET_ACTIVITY_CHARACTERS = 40;
+const MAX_INSPECTION_ACTIVITY_ENTRIES = 20;
+const MAX_INSPECTION_ENTRY_CHARACTERS = 400;
 const RESUME_SESSION_GUIDANCE = [
   "Omit `resume_session_id` for a new session.",
   "If the tool-call interface requires this property, use `null` for a new session.",
@@ -123,6 +127,133 @@ function formatJobWidgetRow(
   return `${branch} ${taskName} · ${runtime} · ${job.id.slice(0, 12)}${status}`;
 }
 
+function cleanActivityText(value: string): string {
+  return value
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function truncateActivityText(value: string, maxCharacters: number): string {
+  const characters = Array.from(value);
+
+  if (characters.length <= maxCharacters) {
+    return value;
+  }
+
+  return `${characters.slice(0, maxCharacters - 1).join("")}…`;
+}
+
+function describeToolActivity(job: JobSnapshot, content: string): string {
+  const cleaned = cleanActivityText(content);
+
+  if (cleaned.length === 0) {
+    return "using a tool";
+  }
+
+  const normalized = cleaned.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const knownDescriptions: Record<string, string> = {
+    read: "reading a file",
+    view: "reading a file",
+    edit: "editing a file",
+    write: "editing a file",
+    notebookedit: "editing a notebook",
+    grep: "searching the codebase",
+    glob: "searching the codebase",
+    websearch: "searching the web",
+    webfetch: "fetching a web page",
+    bash: "shell command",
+    shell: "shell command",
+  };
+  const known = knownDescriptions[normalized];
+
+  if (known !== undefined) {
+    return known;
+  }
+
+  const shortContent = truncateActivityText(
+    cleaned,
+    MAX_WIDGET_ACTIVITY_CHARACTERS,
+  );
+
+  if (
+    job.agentType === "codex" ||
+    job.agentType === "cursor" ||
+    /[\s|&;<>]/.test(cleaned)
+  ) {
+    return `shell command: \`${shortContent}\``;
+  }
+
+  return `using ${shortContent}`;
+}
+
+function describeLatestActivity(job: JobSnapshot): string | undefined {
+  const activity = job.latestActivity;
+
+  if (activity === undefined) {
+    return undefined;
+  }
+
+  if (activity.type === "tool_use") {
+    return describeToolActivity(job, activity.content);
+  }
+
+  if (activity.type === "text") {
+    return "reporting progress";
+  }
+
+  return activity.type === "warning"
+    ? "warning reported"
+    : "error reported";
+}
+
+function formatActivityEntry(activity: JobActivity): string {
+  const label = activity.type === "tool_use" ? "tool" : activity.type;
+  const cleaned = cleanActivityText(activity.content);
+  const content = truncateActivityText(
+    cleaned,
+    MAX_INSPECTION_ENTRY_CHARACTERS,
+  );
+
+  return `[${label}] ${content || "(no displayable content)"}`;
+}
+
+function formatJobInspection(
+  job: JobSnapshot,
+  isDelivering = false,
+): string {
+  const runtime = [
+    job.agentType ?? "subagent",
+    job.model ?? "default",
+    job.effort ?? "default",
+  ].join("/");
+
+  if (isDelivering) {
+    return [
+      `Subagent job ${job.id}: delivering`,
+      `Task: ${job.taskName ?? "Subagent"}`,
+      `Agent: ${runtime}`,
+      "Final result is waiting for delivery.",
+    ].join("\n");
+  }
+
+  const latest = describeLatestActivity(job) ?? "waiting for activity";
+  const activity = job.activity
+    ?.slice(-MAX_INSPECTION_ACTIVITY_ENTRIES)
+    .map(formatActivityEntry) ?? [];
+
+  return [
+    `Subagent job ${job.id}: ${job.status}`,
+    `Task: ${job.taskName ?? "Subagent"}`,
+    `Agent: ${runtime}`,
+    `Last activity: ${latest}`,
+    "",
+    "Activity:",
+    ...(activity.length > 0 ? activity : ["No activity reported yet."]),
+  ].join("\n");
+}
+
 function formatJobListEntry(
   job: JobSnapshot,
   isDelivering: boolean,
@@ -134,8 +265,28 @@ function formatJobListEntry(
     job.model ?? "default",
     `effort: ${job.effort ?? "default"}`,
   ].join(" · ");
+  const latest = isDelivering ? undefined : describeLatestActivity(job);
 
-  return `${job.id}: ${status}\n  ${details}`;
+  return [
+    `${job.id}: ${status}`,
+    `  ${details}`,
+    ...(latest === undefined ? [] : [`  Last activity: ${latest}`]),
+  ].join("\n");
+}
+
+function formatJobLookupFailure(
+  jobId: string,
+  jobs: JobRegistry,
+): string {
+  const activeJobIds = jobs.list().map((job) => `- ${job.id}`);
+  const activeJobs = activeJobIds.length === 0
+    ? "No subagent jobs are currently active."
+    : ["Active subagent jobs:", ...activeJobIds].join("\n");
+
+  return [
+    `No active subagent job found with ID ${jobId}.`,
+    activeJobs,
+  ].join("\n\n");
 }
 
 function formatCancellationFailure(
@@ -187,22 +338,32 @@ function updateJobWidget(
   );
   const visibleJobs = activeJobs.slice(0, 3);
   const hiddenJobs = activeJobs.slice(visibleJobs.length);
-  const rows = visibleJobs.map((job, index) => {
+  const rows: string[] = [];
+
+  visibleJobs.forEach((job, index) => {
     const isLast = hiddenJobs.length === 0 && index === visibleJobs.length - 1;
     const deliveryStatus = deliveries.get(job.id);
     const row = formatJobWidgetRow(job, isLast, deliveryStatus);
-
-    if (deliveryStatus === "completed") {
-      return ctx.ui.theme.fg("success", row);
-    }
-
-    if (deliveryStatus === "failed") {
-      return ctx.ui.theme.fg("error", row);
-    }
-
-    return job.status === "cancelled"
+    const styledRow = deliveryStatus === "completed"
+      ? ctx.ui.theme.fg("success", row)
+      : deliveryStatus === "failed"
+      ? ctx.ui.theme.fg("error", row)
+      : job.status === "cancelled"
       ? ctx.ui.theme.fg("warning", row)
       : row;
+
+    rows.push(styledRow);
+
+    const latest = describeLatestActivity(job);
+    if (latest !== undefined && deliveryStatus === undefined) {
+      const continuation = isLast ? "  " : "│ ";
+      rows.push(
+        ctx.ui.theme.fg(
+          "dim",
+          `${continuation} Last activity: ${latest}`,
+        ),
+      );
+    }
   });
 
   if (hiddenJobs.length > 0) {
@@ -226,6 +387,20 @@ function updateJobWidget(
   );
 }
 
+function safelyUpdateJobWidget(
+  ctx: Pick<ExtensionContext, "hasUI" | "ui">,
+  jobs: JobRegistry,
+  deliveries: ReadonlyMap<string, TerminalJobStatus>,
+): void {
+  try {
+    updateJobWidget(ctx, jobs, deliveries);
+  } catch (error) {
+    process.stderr.write(
+      `Could not update AgentShell job widget: ${errorMessage(error)}\n`,
+    );
+  }
+}
+
 function sendTerminalMessage(
   pi: ExtensionAPI,
   jobs: JobRegistry,
@@ -238,7 +413,7 @@ function sendTerminalMessage(
   deliveries: Map<string, TerminalJobStatus>,
   onWidgetChange: () => void,
 ): void {
-  if (isShuttingDown()) {
+  if (isShuttingDown() || jobs.get(jobId) === undefined) {
     jobs.remove(jobId);
     return;
   }
@@ -297,7 +472,7 @@ function registerJobDeliveryHandler(
 
     if (deliveries.delete(jobId)) {
       jobs.remove(jobId);
-      updateJobWidget(ctx, jobs, deliveries);
+      safelyUpdateJobWidget(ctx, jobs, deliveries);
     }
   });
 }
@@ -383,6 +558,51 @@ function registerSubagentModelsTool(
   });
 }
 
+function registerSubagentStatusTool(
+  pi: ExtensionAPI,
+  jobs: JobRegistry,
+  deliveries: ReadonlyMap<string, TerminalJobStatus>,
+): void {
+  pi.registerTool({
+    name: "subagent_status",
+    label: "Inspect subagent",
+    description: [
+      "Inspect the current status and recent activity of an active subagent job.",
+      "Use this when progress is useful; do not repeatedly poll the job.",
+      "Activity is held only in memory and is removed after final delivery.",
+    ].join(" "),
+    parameters: Type.Object({
+      job_id: Type.String({
+        minLength: 1,
+        description: "Job ID returned by the subagent tool",
+      }),
+    }),
+
+    async execute(_toolCallId, params) {
+      const job = jobs.get(params.job_id);
+
+      if (job === undefined) {
+        throw new Error(formatJobLookupFailure(params.job_id, jobs));
+      }
+
+      const isDelivering = deliveries.has(job.id);
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: formatJobInspection(job, isDelivering),
+        }],
+        details: {
+          status: isDelivering ? "delivering" as const : job.status,
+          jobId: job.id,
+          outputTokens: 0,
+          warnings: [] as string[],
+        },
+      };
+    },
+  });
+}
+
 async function registerSubagentTool(
   pi: ExtensionAPI,
   limits: AgentShellLimits,
@@ -396,6 +616,7 @@ async function registerSubagentTool(
 
   registerJobMessageRenderer(pi);
   registerJobDeliveryHandler(pi, jobs, deliveries);
+  registerSubagentStatusTool(pi, jobs, deliveries);
 
   pi.registerTool({
     name: "subagent",
@@ -403,7 +624,9 @@ async function registerSubagentTool(
     description: [
       "Delegate a task to an AI coding agent in a separate context.",
       "Long-running subagent calls may return `Subagent job <job-id> started`.",
-      "Do not poll the process or run sleep commands. A Job ID is not a session ID.",
+      "Do not repeatedly poll the process or run sleep commands.",
+      "Use subagent_status only when current progress is useful.",
+      "A Job ID is not a session ID.",
       "The extension automatically delivers the result using a follow-up turn.",
       "Continue other work or remain idle until notified.",
       "The real resumable session ID arrives with the completion result.",
@@ -496,7 +719,7 @@ async function registerSubagentTool(
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const silent = isSilentMode();
       const job = jobs.start(
-        (signal) =>
+        (signal, jobId) =>
           runAgentShell(
             {
               agent_type: params.agent_type,
@@ -510,7 +733,13 @@ async function registerSubagentTool(
               disallowed_tools: params.disallowed_tools,
             },
             signal,
-            undefined,
+            (update) => {
+              jobs.recordActivity(jobId, update.activity);
+
+              if (!isShuttingDown()) {
+                safelyUpdateJobWidget(ctx, jobs, deliveries);
+              }
+            },
             limits,
           ),
         {
@@ -521,7 +750,7 @@ async function registerSubagentTool(
         },
       );
 
-      updateJobWidget(ctx, jobs, deliveries);
+      safelyUpdateJobWidget(ctx, jobs, deliveries);
 
       void job.completion.then(
         (result) => {
@@ -542,7 +771,7 @@ async function registerSubagentTool(
             silent,
             isShuttingDown,
             deliveries,
-            () => updateJobWidget(ctx, jobs, deliveries),
+            () => safelyUpdateJobWidget(ctx, jobs, deliveries),
           );
         },
         (error: unknown) => {
@@ -560,7 +789,7 @@ async function registerSubagentTool(
             silent,
             isShuttingDown,
             deliveries,
-            () => updateJobWidget(ctx, jobs, deliveries),
+            () => safelyUpdateJobWidget(ctx, jobs, deliveries),
           );
         },
       );
@@ -589,7 +818,7 @@ async function registerSubagentTool(
         throw new Error(formatCancellationFailure(params.job_id, jobs));
       }
 
-      updateJobWidget(ctx, jobs, deliveries);
+      safelyUpdateJobWidget(ctx, jobs, deliveries);
 
       return {
         content: [
@@ -616,7 +845,8 @@ export default async function subagentsExtension(
     return;
   }
 
-  const jobs = new JobRegistry();
+  const limits = loadAgentShellLimits(getAgentDir());
+  const jobs = new JobRegistry(limits.maxOutputBytes);
   const deliveries = new Map<string, TerminalJobStatus>();
   let shuttingDown = false;
   let silentMode = false;
@@ -642,11 +872,9 @@ export default async function subagentsExtension(
   pi.on("session_shutdown", (_event, ctx) => {
     shuttingDown = true;
     jobs.cancelAll();
+    jobs.clear();
     deliveries.clear();
-
-    if (ctx.hasUI) {
-      ctx.ui.setWidget(JOB_WIDGET_KEY, undefined, JOB_WIDGET_OPTIONS);
-    }
+    safelyUpdateJobWidget(ctx, jobs, deliveries);
   });
 
   pi.registerCommand("agentshell-silent", {
@@ -682,6 +910,26 @@ export default async function subagentsExtension(
     },
   });
 
+  pi.registerCommand("agentshell-inspect", {
+    description: "Inspect recent activity for an active subagent job",
+    handler: async (args, ctx) => {
+      const jobId = args.trim();
+
+      if (jobId.length === 0) {
+        ctx.ui.notify("Usage: /agentshell-inspect <job-id>", "warning");
+        return;
+      }
+
+      const job = jobs.get(jobId);
+      ctx.ui.notify(
+        job === undefined
+          ? formatJobLookupFailure(jobId, jobs)
+          : formatJobInspection(job, deliveries.has(jobId)),
+        job === undefined ? "warning" : "info",
+      );
+    },
+  });
+
   pi.registerCommand("agentshell-cancel", {
     description: "Cancel an active AgentShell subagent job by ID",
     handler: async (args, ctx) => {
@@ -695,7 +943,7 @@ export default async function subagentsExtension(
       const cancelled = jobs.cancel(jobId);
 
       if (cancelled) {
-        updateJobWidget(ctx, jobs, deliveries);
+        safelyUpdateJobWidget(ctx, jobs, deliveries);
       }
 
       ctx.ui.notify(
@@ -707,7 +955,6 @@ export default async function subagentsExtension(
     },
   });
 
-  const limits = loadAgentShellLimits(getAgentDir());
   const registerTool = () =>
     registerSubagentTool(
       pi,

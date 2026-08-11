@@ -48,7 +48,14 @@ export interface RunResult {
   details: RunDetails;
 }
 
-export type RunUpdate = RunResult;
+export interface RunActivity {
+  type: "text" | "tool_use" | "warning" | "error";
+  content: string;
+}
+
+export interface RunUpdate extends RunResult {
+  activity: RunActivity;
+}
 
 interface AgentEvent {
   type: string;
@@ -521,6 +528,19 @@ export async function runAgentShell(
   let sessionId: string | undefined;
   let outputTokens = 0;
 
+  const emitUpdate = (activity: RunActivity) => {
+    onUpdate?.({
+      output: output.join("\n"),
+      activity,
+      details: {
+        status: "running",
+        sessionId,
+        outputTokens: 0,
+        warnings: [...warnings],
+      },
+    });
+  };
+
   const handleLine = (line: string) => {
     if (!line.trim()) {
       return;
@@ -534,6 +554,7 @@ export async function runAgentShell(
       }
 
       warnings.push(message.message);
+      emitUpdate({ type: "warning", content: message.message });
       return;
     }
 
@@ -559,7 +580,9 @@ export async function runAgentShell(
     }
 
     if (event.type === "error" && isNonEmptyString(event.content)) {
-      failureReasons.push(event.content.trim());
+      const content = event.content.trim();
+      failureReasons.push(content);
+      emitUpdate({ type: "error", content });
     }
 
     if (event.type === "result") {
@@ -589,15 +612,11 @@ export async function runAgentShell(
       }
 
       output.push(event.content);
-      onUpdate?.({
-        output: output.join("\n"),
-        details: {
-          status: "running",
-          sessionId,
-          outputTokens: 0,
-          warnings: [...warnings],
-        },
-      });
+      emitUpdate({ type: "text", content: event.content });
+    }
+
+    if (event.type === "tool_use" && isNonEmptyString(event.content)) {
+      emitUpdate({ type: "tool_use", content: event.content });
     }
   };
 

@@ -17,6 +17,12 @@ interface CommandContext {
   };
 }
 
+interface CapturedWidget {
+  key: string;
+  content: string[] | undefined;
+  options?: { placement?: string };
+}
+
 interface CapturedCommand {
   name: string;
   description?: string;
@@ -64,6 +70,7 @@ interface CapturedComponent {
 }
 
 interface CapturedTool {
+  name: string;
   execute: (...args: any[]) => Promise<CapturedResult>;
   renderResult?: (
     result: CapturedResult,
@@ -147,7 +154,7 @@ async function waitFor(
   }
 }
 
-function assertRunningJob(result: CapturedResult): void {
+function assertRunningJob(result: CapturedResult): string {
   assert.equal(result.details.status, "running");
   assert.match(
     result.details.jobId ?? "",
@@ -157,6 +164,8 @@ function assertRunningJob(result: CapturedResult): void {
     result.content[0]?.text,
     `Subagent job ${result.details.jobId} started.`,
   );
+
+  return result.details.jobId as string;
 }
 
 export default async function silentModeHarness(): Promise<void> {
@@ -166,6 +175,7 @@ export default async function silentModeHarness(): Promise<void> {
   const messageRenderers: CapturedMessageRenderer[] = [];
   const sentMessages: SentMessage[] = [];
   const tools: CapturedTool[] = [];
+  const widgets: CapturedWidget[] = [];
 
   const fakePi = {
     registerCommand(
@@ -193,10 +203,14 @@ export default async function silentModeHarness(): Promise<void> {
 
   assert.equal(
     commands.length,
-    3,
-    "the async extension must register silent, jobs, and cancel commands",
+    4,
+    "the extension must register silent, jobs, inspect, and cancel commands",
   );
   const command = commands.find(({ name }) => name === "agentshell-silent");
+  const inspectCommand = commands.find(
+    ({ name }) => name === "agentshell-inspect",
+  );
+  assert.ok(inspectCommand);
   assert.ok(command);
   assert.equal(command.name, "agentshell-silent");
   assert.match(command.description ?? "", /subagent response/i);
@@ -224,33 +238,104 @@ export default async function silentModeHarness(): Promise<void> {
     },
   ]);
 
-  const tool = tools[0];
+  const tool = tools.find(({ name }) => name === "subagent");
+  const statusTool = tools.find(({ name }) => name === "subagent_status");
   assert.ok(tool);
+  assert.ok(statusTool);
   const updates: CapturedResult[] = [];
   const warning =
     "Codex CLI has no per-call allowed_tools mechanism; ignoring";
-
-  await withFakeCodex("hidden response", async () => {
-    const silentResult = await tool.execute(
-      "silent-mode-call",
-      {
-        agent_type: "codex",
-        task_name: "Hidden response",
-        allowed_tools: ["Read"],
-        prompt: "Return a hidden response",
+  const theme: CapturedTheme = {
+    bold: (text) => text,
+    fg: (_color, text) => text,
+  };
+  const toolContext = {
+    cwd: PYTHON_DIR,
+    hasUI: true,
+    ui: {
+      theme,
+      setWidget(
+        key: string,
+        content: string[] | undefined,
+        options?: CapturedWidget["options"],
+      ) {
+        widgets.push({ key, content, options });
       },
-      undefined,
-      (update: CapturedResult) => updates.push(update),
-      { cwd: PYTHON_DIR },
-    );
+    },
+  };
+  const previousToolCommand = process.env.FAKE_CODEX_TOOL_COMMAND;
+  const previousToolDelay = process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS;
+  process.env.FAKE_CODEX_TOOL_COMMAND = "npm test";
+  process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS = "1";
 
-    assertRunningJob(silentResult);
-    assert.deepEqual(updates, []);
-    await waitFor(
-      () => sentMessages.length === 1,
-      "the silent AgentShell completion",
-    );
-  });
+  try {
+    await withFakeCodex("hidden response", async () => {
+      const silentResult = await tool.execute(
+        "silent-mode-call",
+        {
+          agent_type: "codex",
+          task_name: "Hidden response",
+          allowed_tools: ["Read"],
+          prompt: "Return a hidden response",
+        },
+        undefined,
+        (update: CapturedResult) => updates.push(update),
+        toolContext,
+      );
+
+      const silentJobId = assertRunningJob(silentResult);
+      assert.deepEqual(updates, []);
+      await waitFor(
+        () => widgets.at(-1)?.content?.some((line) =>
+          line === "   Last activity: shell command: `npm test`"
+        ) === true,
+        "the silent-mode live activity widget",
+      );
+
+      const silentStatus = await statusTool.execute(
+        "silent-mode-status",
+        { job_id: silentJobId },
+        undefined,
+        undefined,
+        toolContext,
+      );
+      assert.match(silentStatus.content[0]?.text ?? "", /\[tool\] npm test/);
+
+      const inspectNotifications: Array<{
+        message: string;
+        type: string;
+      }> = [];
+      await inspectCommand.handler(silentJobId, {
+        ui: {
+          notify(message, type) {
+            inspectNotifications.push({ message, type });
+          },
+        },
+      });
+      assert.equal(inspectNotifications[0]?.type, "info");
+      assert.match(
+        inspectNotifications[0]?.message ?? "",
+        /\[tool\] npm test/,
+      );
+
+      await waitFor(
+        () => sentMessages.length === 1,
+        "the silent AgentShell completion",
+      );
+    });
+  } finally {
+    if (previousToolCommand === undefined) {
+      delete process.env.FAKE_CODEX_TOOL_COMMAND;
+    } else {
+      process.env.FAKE_CODEX_TOOL_COMMAND = previousToolCommand;
+    }
+
+    if (previousToolDelay === undefined) {
+      delete process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS;
+    } else {
+      process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS = previousToolDelay;
+    }
+  }
 
   assert.deepEqual(sentMessages[0]?.options, {
     triggerTurn: true,
@@ -262,10 +347,6 @@ export default async function silentModeHarness(): Promise<void> {
 
   const messageRenderer = messageRenderers[0];
   assert.ok(messageRenderer);
-  const theme: CapturedTheme = {
-    bold: (text) => text,
-    fg: (_color, text) => text,
-  };
   for (const expanded of [false, true]) {
     assert.deepEqual(
       messageRenderer.renderer(

@@ -757,6 +757,10 @@ test("streams output before the worker exits", { timeout: 5_000 }, async () => {
         assert.deepEqual(updates, [
             {
                 output: "test response",
+                activity: {
+                    type: "text",
+                    content: "test response",
+                },
                 details: {
                     status: "running",
                     sessionId: "test-session",
@@ -780,6 +784,159 @@ test("streams output before the worker exits", { timeout: 5_000 }, async () => {
             delete process.env.FAKE_CODEX_RESULT_DELAY_SECONDS;
         } else {
             process.env.FAKE_CODEX_RESULT_DELAY_SECONDS = previousResultDelay;
+        }
+    }
+});
+
+test("streams tool activity before assistant text", { timeout: 5_000 }, async () => {
+    // Arrange
+    const previousPath = process.env.PATH;
+    const previousToolCommand = process.env.FAKE_CODEX_TOOL_COMMAND;
+    const previousToolDelay = process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS;
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_CODEX_TOOL_COMMAND = "npm test";
+    process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS = "1";
+    const updates: unknown[] = [];
+    const firstUpdate = Promise.withResolvers<void>();
+
+    try {
+        // Act
+        const execution = runAgentShell(
+            {
+                agent_type: "codex",
+                cwd: PYTHON_DIR,
+                prompt: "Run the tests before responding",
+            },
+            undefined,
+            (update: unknown) => {
+                updates.push(update);
+                firstUpdate.resolve();
+            },
+        );
+        const firstOutcome = await Promise.race([
+            firstUpdate.promise.then(() => "update"),
+            execution.then(() => "result"),
+        ]);
+
+        // Assert
+        assert.equal(firstOutcome, "update");
+        assert.deepEqual(updates, [
+            {
+                output: "",
+                activity: {
+                    type: "tool_use",
+                    content: "npm test",
+                },
+                details: {
+                    status: "running",
+                    sessionId: "test-session",
+                    outputTokens: 0,
+                    warnings: [],
+                },
+            },
+        ]);
+        await execution;
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousToolCommand === undefined) {
+            delete process.env.FAKE_CODEX_TOOL_COMMAND;
+        } else {
+            process.env.FAKE_CODEX_TOOL_COMMAND = previousToolCommand;
+        }
+
+        if (previousToolDelay === undefined) {
+            delete process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS;
+        } else {
+            process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS = previousToolDelay;
+        }
+    }
+});
+
+test("streams warnings as live activity", { timeout: 5_000 }, async () => {
+    // Arrange
+    const previousPath = process.env.PATH;
+    process.env.PATH = FAKE_BIN;
+    const updates: unknown[] = [];
+    const warning =
+        "Codex CLI has no per-call allowed_tools mechanism; ignoring";
+
+    try {
+        // Act
+        await runAgentShell(
+            {
+                agent_type: "codex",
+                cwd: PYTHON_DIR,
+                prompt: "Return a response with a warning",
+                allowed_tools: ["Read"],
+            },
+            undefined,
+            (update: unknown) => updates.push(update),
+        );
+
+        // Assert
+        assert.deepEqual(updates[0], {
+            output: "",
+            activity: { type: "warning", content: warning },
+            details: {
+                status: "running",
+                sessionId: undefined,
+                outputTokens: 0,
+                warnings: [warning],
+            },
+        });
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+    }
+});
+
+test("streams agent errors as live activity", { timeout: 5_000 }, async () => {
+    // Arrange
+    const previousPath = process.env.PATH;
+    const previousError = process.env.FAKE_CODEX_ERROR;
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_CODEX_ERROR = "1";
+    const updates: Array<{ activity?: { type?: string; content?: string } }> = [];
+
+    try {
+        // Act
+        await assert.rejects(
+            runAgentShell(
+                {
+                    agent_type: "codex",
+                    cwd: PYTHON_DIR,
+                    prompt: "Fail after partial output",
+                },
+                undefined,
+                (update) => updates.push(update),
+            ),
+            /fake agent failed/,
+        );
+
+        // Assert
+        assert.deepEqual(updates.map(({ activity }) => activity), [
+            { type: "text", content: "test response" },
+            { type: "error", content: "fake agent failed" },
+        ]);
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousError === undefined) {
+            delete process.env.FAKE_CODEX_ERROR;
+        } else {
+            process.env.FAKE_CODEX_ERROR = previousError;
         }
     }
 });

@@ -77,6 +77,13 @@ interface CapturedWidget {
   };
 }
 
+type SessionStartHandler = (
+  event: { type: "session_start" },
+  context: {
+    sessionManager: { getBranch(): [] };
+  },
+) => Promise<void> | void;
+
 type SessionShutdownHandler = (
   event: { type: "session_shutdown" },
   context: unknown,
@@ -236,10 +243,12 @@ function assertRunningJob(result: CapturedResult): string {
 export default async function indexHarness(): Promise<void> {
   const commands: CapturedCommand[] = [];
   const sentMessages: SentMessage[] = [];
+  const sessionStartHandlers: SessionStartHandler[] = [];
   const shutdownHandlers: SessionShutdownHandler[] = [];
   const messageStartHandlers: MessageStartHandler[] = [];
   const tools: CapturedTool[] = [];
   let deferMessageDelivery = false;
+  let rejectActivityWidget = false;
   let eventContext: unknown;
 
   const deliverMessage = (message: CapturedMessage): void => {
@@ -263,9 +272,14 @@ export default async function indexHarness(): Promise<void> {
     registerMessageRenderer() {},
     on(
       event: string,
-      handler: SessionShutdownHandler | MessageStartHandler,
+      handler:
+        | SessionStartHandler
+        | SessionShutdownHandler
+        | MessageStartHandler,
     ) {
-      if (event === "session_shutdown") {
+      if (event === "session_start") {
+        sessionStartHandlers.push(handler as SessionStartHandler);
+      } else if (event === "session_shutdown") {
         shutdownHandlers.push(handler as SessionShutdownHandler);
       } else if (event === "message_start") {
         messageStartHandlers.push(handler as MessageStartHandler);
@@ -283,7 +297,7 @@ export default async function indexHarness(): Promise<void> {
 
   await subagentsExtension(fakePi);
 
-  assert.equal(tools.length, 3);
+  assert.equal(tools.length, 4);
   assert.equal(
     shutdownHandlers.length,
     1,
@@ -292,11 +306,13 @@ export default async function indexHarness(): Promise<void> {
 
   const tool = tools.find(({ name }) => name === "subagent");
   const cancelTool = tools.find(({ name }) => name === "subagent_cancel");
+  const statusTool = tools.find(({ name }) => name === "subagent_status");
   const modelsTool = tools.find(
     ({ name }) => name === "subagent_list_models",
   );
   assert.ok(tool);
   assert.ok(cancelTool);
+  assert.ok(statusTool);
   assert.ok(modelsTool);
 
   const widgets: CapturedWidget[] = [];
@@ -314,6 +330,14 @@ export default async function indexHarness(): Promise<void> {
         content: string[] | undefined,
         options?: CapturedWidget["options"],
       ) {
+        if (
+          rejectActivityWidget &&
+          content?.some((line) => line.includes("Last activity"))
+        ) {
+          rejectActivityWidget = false;
+          throw new Error("activity widget failed");
+        }
+
         widgets.push({ key, content, options });
       },
     },
@@ -321,7 +345,8 @@ export default async function indexHarness(): Promise<void> {
   eventContext = toolContext;
 
   assert.match(tool.description, /Long-running subagent calls may return/i);
-  assert.match(tool.description, /Do not poll/i);
+  assert.match(tool.description, /Do not repeatedly poll/i);
+  assert.match(tool.description, /subagent_status.*progress is useful/i);
   assert.match(tool.description, /sleep commands/i);
   assert.match(tool.description, /A Job ID is not a session ID/i);
   assert.match(tool.description, /automatically delivers.*follow-up turn/i);
@@ -354,6 +379,9 @@ export default async function indexHarness(): Promise<void> {
   assert.deepEqual(cancelTool.parameters.required, ["job_id"]);
   assert.equal(cancelTool.parameters.properties?.job_id?.type, "string");
   assert.equal(cancelTool.parameters.properties?.job_id?.minLength, 1);
+  assert.deepEqual(statusTool.parameters.required, ["job_id"]);
+  assert.equal(statusTool.parameters.properties?.job_id?.type, "string");
+  assert.equal(statusTool.parameters.properties?.job_id?.minLength, 1);
   assert.deepEqual(modelsTool.parameters.required, ["agent_type"]);
   assert.equal(modelsTool.parameters.properties?.cwd?.type, "string");
 
@@ -514,6 +542,10 @@ export default async function indexHarness(): Promise<void> {
   const previousDelay = process.env.FAKE_CODEX_DELAY_SECONDS;
   const previousError = process.env.FAKE_CODEX_ERROR;
   const previousRecoveredPiError = process.env.FAKE_PI_RECOVERED_ERROR;
+  const previousToolCommand = process.env.FAKE_CODEX_TOOL_COMMAND;
+  const previousToolDelay = process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS;
+  const previousResultDelay = process.env.FAKE_CODEX_RESULT_DELAY_SECONDS;
+  const previousResponseJson = process.env.FAKE_CODEX_RESPONSE_JSON;
   process.env.PATH = FAKE_BIN;
   process.env.FAKE_CODEX_ARGS_FILE = argumentsFile;
   process.env.FAKE_CODEX_CWD_FILE = cwdFile;
@@ -567,8 +599,15 @@ export default async function indexHarness(): Promise<void> {
       },
     };
     const jobsCommand = commands.find(({ name }) => name === "agentshell-jobs");
+    const inspectCommand = commands.find(
+      ({ name }) => name === "agentshell-inspect",
+    );
     const cancelCommand = commands.find(({ name }) => name === "agentshell-cancel");
     assert.ok(jobsCommand, "the extension must register /agentshell-jobs");
+    assert.ok(
+      inspectCommand,
+      "the extension must register /agentshell-inspect",
+    );
     assert.ok(cancelCommand, "the extension must register /agentshell-cancel");
 
     process.env.FAKE_CODEX_DELAY_SECONDS = "1";
@@ -644,6 +683,32 @@ export default async function indexHarness(): Promise<void> {
         `${defaultJobId}: delivering`,
         "  Default cwd · codex · default · effort: default",
       ].join("\n"),
+    );
+
+    const deliveringStatus = await statusTool.execute(
+      "index-test-delivering-status",
+      { job_id: defaultJobId },
+      undefined,
+      undefined,
+      toolContext,
+    );
+    assert.equal(deliveringStatus.details.status, "delivering");
+    const expectedDeliveringInspection = [
+      `Subagent job ${defaultJobId}: delivering`,
+      "Task: Default cwd",
+      "Agent: codex/default/default",
+      "Final result is waiting for delivery.",
+    ].join("\n");
+    assert.equal(
+      deliveringStatus.content[0]?.text,
+      expectedDeliveringInspection,
+    );
+    assert.doesNotMatch(deliveringStatus.content[0]?.text ?? "", /test response/);
+
+    await inspectCommand.handler(defaultJobId, commandContext);
+    assert.equal(
+      notifications.at(-1)?.message,
+      expectedDeliveringInspection,
     );
 
     const firstMessage = sentMessages[0]?.message;
@@ -1055,6 +1120,200 @@ export default async function indexHarness(): Promise<void> {
     deferMessageDelivery = false;
     assert.equal(widgets.at(-1)?.content, undefined);
 
+    delete process.env.FAKE_CODEX_DELAY_SECONDS;
+    process.env.FAKE_CODEX_TOOL_COMMAND = "npm test";
+    rejectActivityWidget = true;
+    const sentBeforeWidgetFailure = sentMessages.length;
+    const widgetFailureResult = await tool.execute(
+      "index-test-widget-failure",
+      {
+        agent_type: "codex",
+        task_name: "Widget failure",
+        prompt: "Complete despite a widget error",
+      },
+      undefined,
+      undefined,
+      toolContext,
+    );
+    assertRunningJob(widgetFailureResult);
+    await waitFor(
+      () => sentMessages.length === sentBeforeWidgetFailure + 1,
+      "the job completion after a widget error",
+    );
+    assert.equal(sentMessages.at(-1)?.message.details?.status, "completed");
+
+    delete process.env.FAKE_CODEX_TOOL_COMMAND;
+    process.env.FAKE_CODEX_RESPONSE_JSON = JSON.stringify(
+      `line one\n[tool] forged\u001b[31m ${"x".repeat(20_000)}`,
+    );
+    process.env.FAKE_CODEX_RESULT_DELAY_SECONDS = "1";
+    const sentBeforeSanitization = sentMessages.length;
+    const sanitizationResult = await tool.execute(
+      "index-test-inspection-sanitization",
+      {
+        agent_type: "codex",
+        task_name: "Sanitize inspection",
+        prompt: "Return adversarial terminal text",
+      },
+      undefined,
+      undefined,
+      toolContext,
+    );
+    const sanitizationJobId = assertRunningJob(sanitizationResult);
+    await waitFor(
+      () => widgets.at(-1)?.content?.some((line) =>
+        line.includes("Last activity: reporting progress")
+      ) === true,
+      "the adversarial assistant text activity",
+    );
+    const sanitizationStatus = await statusTool.execute(
+      "index-test-sanitization-status",
+      { job_id: sanitizationJobId },
+      undefined,
+      undefined,
+      toolContext,
+    );
+    const sanitizedInspection = sanitizationStatus.content[0]?.text ?? "";
+    assert.doesNotMatch(sanitizedInspection, /\u001b/);
+    assert.doesNotMatch(sanitizedInspection, /\n\[tool\] forged/);
+    assert.match(sanitizedInspection, /\[text\] line one \[tool\] forged x/);
+    const inspectedText = sanitizedInspection
+      .split("\n")
+      .find((line) => line.startsWith("[text] "));
+    assert.ok(inspectedText);
+    assert.equal(Array.from(inspectedText.slice("[text] ".length)).length, 400);
+    assert.ok(inspectedText.endsWith("…"));
+    await waitFor(
+      () => sentMessages.length === sentBeforeSanitization + 1,
+      "the sanitization test completion",
+    );
+    delete process.env.FAKE_CODEX_RESPONSE_JSON;
+    delete process.env.FAKE_CODEX_RESULT_DELAY_SECONDS;
+
+    process.env.FAKE_CODEX_TOOL_COMMAND =
+      "npm test -- --runInBand --reporter verbose --coverage";
+    process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS = "1";
+    process.env.FAKE_CODEX_RESULT_DELAY_SECONDS = "1";
+    const sentBeforeLiveActivity = sentMessages.length;
+    const liveActivityResult = await tool.execute(
+      "index-test-live-activity",
+      {
+        agent_type: "codex",
+        task_name: "Live activity",
+        prompt: "Run the tests before responding",
+      },
+      undefined,
+      undefined,
+      toolContext,
+    );
+    const liveActivityJobId = assertRunningJob(liveActivityResult);
+    const liveActivityIdentity =
+      `Live activity · codex/default/default · ${
+        liveActivityJobId.slice(0, 12)
+      }`;
+    await waitFor(
+      () => widgets.at(-1)?.content?.some((line) =>
+        line.includes("Last activity")
+      ) === true,
+      "the live activity widget update",
+    );
+    assert.deepEqual(widgets.at(-1)?.content, [
+      "● Background agents · 1 running",
+      `└─ ${liveActivityIdentity}`,
+      "   Last activity: shell command: " +
+        "`npm test -- --runInBand --reporter verb…`",
+    ]);
+
+    const liveStatus = await statusTool.execute(
+      "index-test-live-status",
+      { job_id: liveActivityJobId },
+      undefined,
+      undefined,
+      toolContext,
+    );
+    assert.equal(liveStatus.details.status, "running");
+    assert.equal(liveStatus.details.jobId, liveActivityJobId);
+    const expectedLiveInspection = [
+      `Subagent job ${liveActivityJobId}: running`,
+      "Task: Live activity",
+      "Agent: codex/default/default",
+      "Last activity: shell command: " +
+        "`npm test -- --runInBand --reporter verb…`",
+      "",
+      "Activity:",
+      "[tool] npm test -- --runInBand --reporter verbose --coverage",
+    ].join("\n");
+    assert.equal(liveStatus.content[0]?.text, expectedLiveInspection);
+
+    await inspectCommand.handler(liveActivityJobId, commandContext);
+    assert.deepEqual(notifications.at(-1), {
+      message: expectedLiveInspection,
+      type: "info",
+    });
+
+    await waitFor(
+      () => widgets.at(-1)?.content?.some((line) =>
+        line.includes("Last activity: reporting progress")
+      ) === true,
+      "the live assistant text widget update",
+    );
+    const textStatus = await statusTool.execute(
+      "index-test-live-text-status",
+      { job_id: liveActivityJobId },
+      undefined,
+      undefined,
+      toolContext,
+    );
+    assert.equal(
+      textStatus.content[0]?.text,
+      [
+        `Subagent job ${liveActivityJobId}: running`,
+        "Task: Live activity",
+        "Agent: codex/default/default",
+        "Last activity: reporting progress",
+        "",
+        "Activity:",
+        "[tool] npm test -- --runInBand --reporter verbose --coverage",
+        "[text] test response",
+      ].join("\n"),
+    );
+    await waitFor(
+      () => sentMessages.length === sentBeforeLiveActivity + 1,
+      "the live activity completion",
+    );
+    await assert.rejects(
+      statusTool.execute(
+        "index-test-live-status-after-delivery",
+        { job_id: liveActivityJobId },
+        undefined,
+        undefined,
+        toolContext,
+      ),
+      /No active subagent job found/,
+    );
+    delete process.env.FAKE_CODEX_TOOL_COMMAND;
+    delete process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS;
+    delete process.env.FAKE_CODEX_RESULT_DELAY_SECONDS;
+
+    deferMessageDelivery = true;
+    const sentBeforeQueuedShutdown = sentMessages.length;
+    const queuedShutdownResult = await tool.execute(
+      "index-test-shutdown-delivering",
+      {
+        agent_type: "codex",
+        task_name: "Shutdown delivering",
+        prompt: "Complete before session shutdown",
+      },
+      undefined,
+      undefined,
+      toolContext,
+    );
+    const queuedShutdownJobId = assertRunningJob(queuedShutdownResult);
+    await waitFor(
+      () => sentMessages.length === sentBeforeQueuedShutdown + 1,
+      "the queued completion before shutdown",
+    );
+
     process.env.FAKE_CODEX_DELAY_SECONDS = "0.2";
     rmSync(startedFile, { force: true });
     const sentBeforeShutdown = sentMessages.length;
@@ -1088,8 +1347,22 @@ export default async function indexHarness(): Promise<void> {
       { type: "session_shutdown" },
       toolContext,
     );
+    await sessionStartHandlers[0]?.(
+      { type: "session_start" },
+      { sessionManager: { getBranch: () => [] } },
+    );
     await delay(400);
     assert.equal(sentMessages.length, sentBeforeShutdown);
+    await assert.rejects(
+      statusTool.execute(
+        "index-test-status-after-shutdown",
+        { job_id: queuedShutdownJobId },
+        undefined,
+        undefined,
+        toolContext,
+      ),
+      /No active subagent job found/,
+    );
     assert.deepEqual(widgets.at(-1), {
       key: "agentshell-jobs",
       content: undefined,
@@ -1136,6 +1409,30 @@ export default async function indexHarness(): Promise<void> {
       delete process.env.FAKE_PI_RECOVERED_ERROR;
     } else {
       process.env.FAKE_PI_RECOVERED_ERROR = previousRecoveredPiError;
+    }
+
+    if (previousToolCommand === undefined) {
+      delete process.env.FAKE_CODEX_TOOL_COMMAND;
+    } else {
+      process.env.FAKE_CODEX_TOOL_COMMAND = previousToolCommand;
+    }
+
+    if (previousToolDelay === undefined) {
+      delete process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS;
+    } else {
+      process.env.FAKE_CODEX_AFTER_TOOL_DELAY_SECONDS = previousToolDelay;
+    }
+
+    if (previousResultDelay === undefined) {
+      delete process.env.FAKE_CODEX_RESULT_DELAY_SECONDS;
+    } else {
+      process.env.FAKE_CODEX_RESULT_DELAY_SECONDS = previousResultDelay;
+    }
+
+    if (previousResponseJson === undefined) {
+      delete process.env.FAKE_CODEX_RESPONSE_JSON;
+    } else {
+      process.env.FAKE_CODEX_RESPONSE_JSON = previousResponseJson;
     }
 
     rmSync(temporaryDirectory, { recursive: true, force: true });

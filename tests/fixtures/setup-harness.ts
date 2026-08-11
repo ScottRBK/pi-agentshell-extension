@@ -136,7 +136,7 @@ export default async function setupHarness(): Promise<void> {
 
   await subagentsExtension(fakePi);
 
-  assert.equal(tools.length, scenario === "outdated" ? 2 : 0);
+  assert.equal(tools.length, scenario === "outdated" ? 3 : 0);
   assert.equal(sessionStarts.length, 2);
 
   const context: SetupContext = {
@@ -167,15 +167,17 @@ export default async function setupHarness(): Promise<void> {
   if (scenario === "install") {
     assert.equal(confirmCalls, 1);
     assert.equal(execCalls.length, 2);
-    assert.equal(tools.length, 3);
+    assert.equal(tools.length, 4);
     assert.ok(tools.some(({ name }) => name === "subagent"));
     assert.ok(tools.some(({ name }) => name === "subagent_list_models"));
+    assert.ok(tools.some(({ name }) => name === "subagent_status"));
     assert.ok(tools.some(({ name }) => name === "subagent_cancel"));
     assert.ok(notifications.some(({ message }) => /ready/.test(message)));
   } else if (scenario === "outdated") {
     assert.equal(confirmCalls, 0);
     assert.equal(execCalls.length, 0);
     assert.ok(tools.some(({ name }) => name === "subagent"));
+    assert.ok(tools.some(({ name }) => name === "subagent_status"));
     assert.ok(tools.some(({ name }) => name === "subagent_cancel"));
     assert.ok(!tools.some(({ name }) => name === "subagent_list_models"));
     assert.ok(

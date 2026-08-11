@@ -94,37 +94,56 @@ When the job finishes, its response is delivered to the parent as a follow-up me
 is idle, this starts a turn immediately. If the parent is already working, Pi queues the completion
 until that work finishes. Do not poll the process or run sleep commands while waiting.
 
-Use these commands to inspect or cancel active jobs. The job list includes each task name, harness,
-model, effort, status, and full Job ID:
+Use these commands to list, inspect, or cancel active jobs. The job list includes each task name,
+harness, model, effort, status, full Job ID, and latest activity when available:
 
 ```text
 /agentshell-jobs
+/agentshell-inspect <job-id>
 /agentshell-cancel <job-id>
 ```
 
-Parent agents can cancel a known Job ID through the `subagent_cancel` tool, so cancellation does not
-require the user to enter a slash command.
+Parent agents can inspect a known job without repeatedly polling it:
+
+```text
+subagent_status({
+  job_id: "job-..."
+})
+```
+
+The status result contains a bounded activity tail with tool use, assistant text, warnings, and
+errors. Once a result is queued for delivery, inspection reports `delivering` without repeating the
+final text. Parent agents can cancel a known Job ID through `subagent_cancel`, so neither inspection
+nor cancellation requires the user to enter a slash command.
 
 While jobs are active, Pi shows a compact widget above the editor. Each row identifies the task by
-name, harness, model, effort, and shortened Job ID. The widget displays the three oldest jobs and
-summarises any additional jobs as `+N more running`. Cancelling jobs remain visible until their
-workers stop. Finished jobs then show `delivering…` until Pi starts displaying their queued
-follow-up messages. The widget disappears when no jobs or pending results remain.
+name, harness, model, effort, and shortened Job ID. When AgentShell reports activity, a second line
+shows a short `Last activity` description. Known tool names receive friendly descriptions; shell
+commands are shown as short, truncated commands. This is the most recent observable event, not a
+guarantee that the action is still running.
+
+The widget displays the three oldest jobs and summarises any additional jobs as `+N more running`.
+Cancelling jobs remain visible until their workers stop. Finished jobs then show `delivering…` until
+Pi starts displaying their queued follow-up messages. The widget disappears when no jobs or pending
+results remain.
 
 A Job ID only identifies the background job; it is not a resumable subagent session ID. The real
 session ID arrives with a successful completion result. Only active jobs remain in the registry.
 Completed, failed, and cancelled jobs are removed after their result is delivered because the result
-is already stored in Pi's conversation history. Job IDs and active jobs belong to the current Pi
-session. Session shutdown cancels remaining work.
+is already stored in Pi's conversation history. Live activity is held only in memory and is removed
+with the job; the extension does not create its own transcript files. Job IDs and active jobs belong
+to the current Pi session. Session shutdown cancels remaining work.
 
 ### Silent Mode
 
 Run `/agentshell-silent` to hide successful subagent responses in Pi. Run it again to restore normal
 output. Silent calls display `✓ Completed`, while warnings and errors remain visible.
 
-The parent agent still receives the complete response. Each job captures the output mode when it is
-submitted. The setting belongs to the current Pi session and survives `/reload` and session
-resumption. New sessions start with normal output.
+The parent agent still receives the complete response. Silent mode does not hide the live activity
+widget, `/agentshell-inspect`, or `subagent_status`; it only changes successful final-message
+rendering. Each job captures the output mode when it is submitted. The setting belongs to the
+current Pi session and survives `/reload` and session resumption. New sessions start with normal
+output.
 
 ### Resuming a Subagent
 
@@ -153,7 +172,7 @@ The extension stops a subagent if any of these limits are exceeded:
 
 | Setting | Default | What it limits |
 | --- | ---: | --- |
-| `maxOutputBytes` | 64 KiB | Text returned to Pi. |
+| `maxOutputBytes` | 64 KiB | Text returned to Pi and each job's live activity tail. |
 | `maxProtocolBytes` | 2 MiB | Total data sent by the AgentShell worker. |
 | `maxMessageBytes` | 256 KiB | One message sent by the AgentShell worker. |
 | `maxStderrBytes` | 256 KiB | Diagnostic output from the AgentShell worker. |
