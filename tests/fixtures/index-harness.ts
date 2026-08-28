@@ -89,6 +89,16 @@ type SessionShutdownHandler = (
   context: unknown,
 ) => Promise<void> | void;
 
+type AgentStartHandler = (
+  event: { type: "agent_start" },
+  context: unknown,
+) => Promise<void> | void;
+
+type AgentSettledHandler = (
+  event: { type: "agent_settled" },
+  context: unknown,
+) => Promise<void> | void;
+
 type MessageStartHandler = (
   event: {
     type: "message_start";
@@ -245,10 +255,13 @@ export default async function indexHarness(): Promise<void> {
   const sentMessages: SentMessage[] = [];
   const sessionStartHandlers: SessionStartHandler[] = [];
   const shutdownHandlers: SessionShutdownHandler[] = [];
+  const agentStartHandlers: AgentStartHandler[] = [];
+  const agentSettledHandlers: AgentSettledHandler[] = [];
   const messageStartHandlers: MessageStartHandler[] = [];
   const tools: CapturedTool[] = [];
   let deferMessageDelivery = false;
   let rejectActivityWidget = false;
+  let parentAgentIdle = true;
   let eventContext: unknown;
 
   const deliverMessage = (message: CapturedMessage): void => {
@@ -259,6 +272,18 @@ export default async function indexHarness(): Promise<void> {
 
     for (const handler of messageStartHandlers) {
       void handler(event, eventContext);
+    }
+  };
+
+  const emitAgentStart = async (): Promise<void> => {
+    for (const handler of agentStartHandlers) {
+      await handler({ type: "agent_start" }, eventContext);
+    }
+  };
+
+  const emitAgentSettled = async (): Promise<void> => {
+    for (const handler of agentSettledHandlers) {
+      await handler({ type: "agent_settled" }, eventContext);
     }
   };
 
@@ -275,12 +300,18 @@ export default async function indexHarness(): Promise<void> {
       handler:
         | SessionStartHandler
         | SessionShutdownHandler
+        | AgentStartHandler
+        | AgentSettledHandler
         | MessageStartHandler,
     ) {
       if (event === "session_start") {
         sessionStartHandlers.push(handler as SessionStartHandler);
       } else if (event === "session_shutdown") {
         shutdownHandlers.push(handler as SessionShutdownHandler);
+      } else if (event === "agent_start") {
+        agentStartHandlers.push(handler as AgentStartHandler);
+      } else if (event === "agent_settled") {
+        agentSettledHandlers.push(handler as AgentSettledHandler);
       } else if (event === "message_start") {
         messageStartHandlers.push(handler as MessageStartHandler);
       }
@@ -323,6 +354,7 @@ export default async function indexHarness(): Promise<void> {
   const toolContext = {
     cwd: PYTHON_DIR,
     hasUI: true,
+    isIdle: () => parentAgentIdle,
     ui: {
       theme,
       setWidget(
@@ -384,6 +416,249 @@ export default async function indexHarness(): Promise<void> {
   assert.equal(statusTool.parameters.properties?.job_id?.minLength, 1);
   assert.deepEqual(modelsTool.parameters.required, ["agent_type"]);
   assert.equal(modelsTool.parameters.properties?.cwd?.type, "string");
+
+  if (process.env.INDEX_DELIVERY_IDLE_CHECK_TEST === "1") {
+    const previousPath = process.env.PATH;
+    const previousResponse = process.env.FAKE_CODEX_RESPONSE;
+
+    process.env.PATH = FAKE_BIN;
+    delete process.env.FAKE_CODEX_DELAY_SECONDS;
+    process.env.FAKE_CODEX_RESPONSE = "idle check race result";
+    deferMessageDelivery = true;
+
+    try {
+      await emitAgentStart();
+      parentAgentIdle = false;
+      await emitAgentSettled();
+
+      const result = await tool.execute(
+        "index-test-delivery-idle-check",
+        {
+          agent_type: "codex",
+          task_name: "Idle check race",
+          prompt: "Return a result while the parent remains active",
+        },
+        undefined,
+        undefined,
+        toolContext,
+      );
+      const jobId = assertRunningJob(result);
+      await waitFor(
+        () => widgets.at(-1)?.content?.[0] ===
+          "◆ Background agents · 1 delivering",
+        "the completion after a non-idle settlement",
+      );
+
+      assert.equal(sentMessages.length, 0);
+
+      parentAgentIdle = true;
+      await emitAgentSettled();
+      assert.equal(sentMessages.length, 1);
+      assert.equal(sentMessages[0]?.message.details?.jobId, jobId);
+
+      const [sent] = sentMessages;
+      assert.ok(sent);
+      deliverMessage(sent.message);
+      assert.deepEqual(widgets.at(-1), {
+        key: "agentshell-jobs",
+        content: undefined,
+        options: { placement: "aboveEditor" },
+      });
+      await assert.rejects(
+        statusTool.execute(
+          "index-test-delivery-idle-check-status",
+          { job_id: jobId },
+          undefined,
+          undefined,
+          toolContext,
+        ),
+        /No active subagent job found/,
+      );
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+
+      if (previousResponse === undefined) {
+        delete process.env.FAKE_CODEX_RESPONSE;
+      } else {
+        process.env.FAKE_CODEX_RESPONSE = previousResponse;
+      }
+    }
+
+    process.stderr.write("INDEX_DELIVERY_IDLE_CHECK_HARNESS_OK\n");
+    return;
+  }
+
+  if (process.env.INDEX_DELIVERY_RACE_TEST === "1") {
+    const previousPath = process.env.PATH;
+    const previousResponse = process.env.FAKE_CODEX_RESPONSE;
+
+    process.env.PATH = FAKE_BIN;
+    delete process.env.FAKE_CODEX_DELAY_SECONDS;
+    process.env.FAKE_CODEX_RESPONSE = "first race result";
+    deferMessageDelivery = true;
+
+    try {
+      await emitAgentStart();
+      const firstResult = await tool.execute(
+        "index-test-delivery-race-first",
+        {
+          agent_type: "codex",
+          task_name: "Race first",
+          prompt: "Return the first race result",
+        },
+        undefined,
+        undefined,
+        toolContext,
+      );
+      const firstJobId = assertRunningJob(firstResult);
+      await waitFor(
+        () => widgets.at(-1)?.content?.[0] ===
+          "◆ Background agents · 1 delivering",
+        "the first completion while the parent agent is active",
+      );
+
+      process.env.FAKE_CODEX_RESPONSE = "second race result";
+      const secondResult = await tool.execute(
+        "index-test-delivery-race-second",
+        {
+          agent_type: "codex",
+          task_name: "Race second",
+          prompt: "Return the second race result",
+        },
+        undefined,
+        undefined,
+        toolContext,
+      );
+      const secondJobId = assertRunningJob(secondResult);
+      await waitFor(
+        () => widgets.at(-1)?.content?.[0] ===
+          "◆ Background agents · 2 delivering",
+        "the second completion while the parent agent is active",
+      );
+
+      assert.equal(sentMessages.length, 0);
+      assert.deepEqual(widgets.at(-1)?.content, [
+        "◆ Background agents · 2 delivering",
+        `├─ Race first · codex/default/default · ${firstJobId.slice(0, 12)} ` +
+          "· completed · delivering…",
+        `└─ Race second · codex/default/default · ${secondJobId.slice(0, 12)} ` +
+          "· completed · delivering…",
+      ]);
+
+      await emitAgentSettled();
+      assert.equal(sentMessages.length, 2);
+      assert.deepEqual(
+        sentMessages.map(({ message }) => message.details?.jobId),
+        [firstJobId, secondJobId],
+      );
+      assert.deepEqual(
+        sentMessages.map(({ options }) => options),
+        [
+          { triggerTurn: true, deliverAs: "followUp" },
+          { triggerTurn: true, deliverAs: "followUp" },
+        ],
+      );
+
+      for (const { message } of sentMessages) {
+        deliverMessage(message);
+      }
+      assert.deepEqual(widgets.at(-1), {
+        key: "agentshell-jobs",
+        content: undefined,
+        options: { placement: "aboveEditor" },
+      });
+      await assert.rejects(
+        statusTool.execute(
+          "index-test-delivery-race-status-first",
+          { job_id: firstJobId },
+          undefined,
+          undefined,
+          toolContext,
+        ),
+        /No active subagent job found/,
+      );
+      await assert.rejects(
+        statusTool.execute(
+          "index-test-delivery-race-status-second",
+          { job_id: secondJobId },
+          undefined,
+          undefined,
+          toolContext,
+        ),
+        /No active subagent job found/,
+      );
+
+      await emitAgentSettled();
+      assert.equal(sentMessages.length, 2);
+
+      await emitAgentStart();
+      process.env.FAKE_CODEX_RESPONSE = "discarded race result";
+      const shutdownResult = await tool.execute(
+        "index-test-delivery-race-shutdown",
+        {
+          agent_type: "codex",
+          task_name: "Race shutdown",
+          prompt: "Return a result that should be discarded",
+        },
+        undefined,
+        undefined,
+        toolContext,
+      );
+      const shutdownJobId = assertRunningJob(shutdownResult);
+      await waitFor(
+        () => widgets.at(-1)?.content?.[0] ===
+          "◆ Background agents · 1 delivering",
+        "the completion queued before session shutdown",
+      );
+
+      await shutdownHandlers[0]?.(
+        { type: "session_shutdown" },
+        toolContext,
+      );
+      assert.equal(sentMessages.length, 2);
+      assert.deepEqual(widgets.at(-1), {
+        key: "agentshell-jobs",
+        content: undefined,
+        options: { placement: "aboveEditor" },
+      });
+      await assert.rejects(
+        statusTool.execute(
+          "index-test-delivery-race-status-shutdown",
+          { job_id: shutdownJobId },
+          undefined,
+          undefined,
+          toolContext,
+        ),
+        /No active subagent job found/,
+      );
+
+      await sessionStartHandlers[0]?.(
+        { type: "session_start" },
+        { sessionManager: { getBranch: () => [] } },
+      );
+      await emitAgentSettled();
+      assert.equal(sentMessages.length, 2);
+    } finally {
+      if (previousPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = previousPath;
+      }
+
+      if (previousResponse === undefined) {
+        delete process.env.FAKE_CODEX_RESPONSE;
+      } else {
+        process.env.FAKE_CODEX_RESPONSE = previousResponse;
+      }
+    }
+
+    process.stderr.write("INDEX_DELIVERY_RACE_HARNESS_OK\n");
+    return;
+  }
 
   if (process.env.INDEX_LIMIT_TEST === "1") {
     const previousPath = process.env.PATH;

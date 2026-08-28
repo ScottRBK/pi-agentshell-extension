@@ -53,6 +53,82 @@ test("submits subagent jobs and delivers their completions", {
   assert.match(completed.stderr, /INDEX_HARNESS_OK/);
 });
 
+test("defers active-agent completions until settlement", {
+  timeout: 15_000,
+}, () => {
+  const env = {
+    ...process.env,
+    INDEX_DELIVERY_RACE_TEST: "1",
+  };
+  delete env.PI_AGENT_SHELL_CHILD;
+
+  const completed = spawnSync(
+    "pi",
+    [
+      "--mode",
+      "rpc",
+      "--offline",
+      "--no-session",
+      "--no-extensions",
+      "--extension",
+      HARNESS,
+    ],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      env,
+      input: '{"type":"get_state","id":"index-delivery-race-test"}\n',
+      timeout: 10_000,
+    },
+  );
+
+  assert.equal(completed.error, undefined, completed.error?.message);
+  assert.equal(
+    completed.status,
+    0,
+    `stdout:\n${completed.stdout}\nstderr:\n${completed.stderr}`,
+  );
+  assert.match(completed.stderr, /INDEX_DELIVERY_RACE_HARNESS_OK/);
+});
+
+test("keeps the parent active after a non-idle settlement", {
+  timeout: 15_000,
+}, () => {
+  const env = {
+    ...process.env,
+    INDEX_DELIVERY_IDLE_CHECK_TEST: "1",
+  };
+  delete env.PI_AGENT_SHELL_CHILD;
+
+  const completed = spawnSync(
+    "pi",
+    [
+      "--mode",
+      "rpc",
+      "--offline",
+      "--no-session",
+      "--no-extensions",
+      "--extension",
+      HARNESS,
+    ],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      env,
+      input: '{"type":"get_state","id":"index-delivery-idle-check-test"}\n',
+      timeout: 10_000,
+    },
+  );
+
+  assert.equal(completed.error, undefined, completed.error?.message);
+  assert.equal(
+    completed.status,
+    0,
+    `stdout:\n${completed.stdout}\nstderr:\n${completed.stderr}`,
+  );
+  assert.match(completed.stderr, /INDEX_DELIVERY_IDLE_CHECK_HARNESS_OK/);
+});
+
 test("applies user-configured AgentShell limits", {
   timeout: 15_000,
 }, () => {

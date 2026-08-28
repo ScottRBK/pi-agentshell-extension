@@ -51,6 +51,14 @@ interface JobResultMessageDetails {
   silent?: boolean;
 }
 
+interface PendingTerminalMessage {
+  jobId: string;
+  status: TerminalJobStatus;
+  output: string;
+  warnings: string[];
+  silent: boolean;
+}
+
 function setupCommand(): string {
   return [
     "uv sync --project",
@@ -401,24 +409,21 @@ function safelyUpdateJobWidget(
   }
 }
 
-function sendTerminalMessage(
+function deliverTerminalMessage(
   pi: ExtensionAPI,
   jobs: JobRegistry,
-  jobId: string,
-  status: TerminalJobStatus,
-  output: string,
-  warnings: string[],
-  silent: boolean,
+  message: PendingTerminalMessage,
   isShuttingDown: () => boolean,
   deliveries: Map<string, TerminalJobStatus>,
   onWidgetChange: () => void,
 ): void {
+  const { jobId, status, output, warnings, silent } = message;
+
   if (isShuttingDown() || jobs.get(jobId) === undefined) {
+    deliveries.delete(jobId);
     jobs.remove(jobId);
     return;
   }
-
-  deliveries.set(jobId, status);
 
   try {
     pi.sendMessage<JobResultMessageDetails>(
@@ -446,6 +451,61 @@ function sendTerminalMessage(
     deliveries.delete(jobId);
     jobs.remove(jobId);
     onWidgetChange();
+  }
+}
+
+function sendTerminalMessage(
+  pi: ExtensionAPI,
+  jobs: JobRegistry,
+  message: PendingTerminalMessage,
+  isShuttingDown: () => boolean,
+  isParentAgentActive: () => boolean,
+  deliveries: Map<string, TerminalJobStatus>,
+  pendingMessages: PendingTerminalMessage[],
+  onWidgetChange: () => void,
+): void {
+  if (isShuttingDown() || jobs.get(message.jobId) === undefined) {
+    jobs.remove(message.jobId);
+    return;
+  }
+
+  deliveries.set(message.jobId, message.status);
+
+  if (isParentAgentActive()) {
+    pendingMessages.push(message);
+    onWidgetChange();
+    return;
+  }
+
+  deliverTerminalMessage(
+    pi,
+    jobs,
+    message,
+    isShuttingDown,
+    deliveries,
+    onWidgetChange,
+  );
+}
+
+function flushPendingTerminalMessages(
+  pi: ExtensionAPI,
+  jobs: JobRegistry,
+  pendingMessages: PendingTerminalMessage[],
+  isShuttingDown: () => boolean,
+  deliveries: Map<string, TerminalJobStatus>,
+  onWidgetChange: () => void,
+): void {
+  const messages = pendingMessages.splice(0);
+
+  for (const message of messages) {
+    deliverTerminalMessage(
+      pi,
+      jobs,
+      message,
+      isShuttingDown,
+      deliveries,
+      onWidgetChange,
+    );
   }
 }
 
@@ -608,6 +668,8 @@ async function registerSubagentTool(
   limits: AgentShellLimits,
   jobs: JobRegistry,
   deliveries: Map<string, TerminalJobStatus>,
+  pendingMessages: PendingTerminalMessage[],
+  isParentAgentActive: () => boolean,
   isSilentMode: () => boolean,
   isShuttingDown: () => boolean,
   modelDiscoverySupported: boolean,
@@ -764,13 +826,17 @@ async function registerSubagentTool(
           sendTerminalMessage(
             pi,
             jobs,
-            job.id,
-            status,
-            output,
-            result.details.warnings,
-            silent,
+            {
+              jobId: job.id,
+              status,
+              output,
+              warnings: result.details.warnings,
+              silent,
+            },
             isShuttingDown,
+            isParentAgentActive,
             deliveries,
+            pendingMessages,
             () => safelyUpdateJobWidget(ctx, jobs, deliveries),
           );
         },
@@ -782,13 +848,17 @@ async function registerSubagentTool(
           sendTerminalMessage(
             pi,
             jobs,
-            job.id,
-            status,
-            errorMessage(error),
-            [],
-            silent,
+            {
+              jobId: job.id,
+              status,
+              output: errorMessage(error),
+              warnings: [],
+              silent,
+            },
             isShuttingDown,
+            isParentAgentActive,
             deliveries,
+            pendingMessages,
             () => safelyUpdateJobWidget(ctx, jobs, deliveries),
           );
         },
@@ -848,10 +918,37 @@ export default async function subagentsExtension(
   const limits = loadAgentShellLimits(getAgentDir());
   const jobs = new JobRegistry(limits.maxOutputBytes);
   const deliveries = new Map<string, TerminalJobStatus>();
+  const pendingMessages: PendingTerminalMessage[] = [];
+  let parentAgentActive = false;
   let shuttingDown = false;
   let silentMode = false;
 
+  pi.on("agent_start", () => {
+    parentAgentActive = true;
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    if (!ctx.isIdle()) {
+      parentAgentActive = true;
+      return;
+    }
+
+    parentAgentActive = false;
+
+    flushPendingTerminalMessages(
+      pi,
+      jobs,
+      pendingMessages,
+      () => shuttingDown,
+      deliveries,
+      () => safelyUpdateJobWidget(ctx, jobs, deliveries),
+    );
+  });
+
   pi.on("session_start", (_event, ctx) => {
+    parentAgentActive = false;
+    pendingMessages.length = 0;
+    deliveries.clear();
     shuttingDown = false;
     silentMode = false;
 
@@ -870,6 +967,8 @@ export default async function subagentsExtension(
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
+    parentAgentActive = false;
+    pendingMessages.length = 0;
     shuttingDown = true;
     jobs.cancelAll();
     jobs.clear();
@@ -961,6 +1060,8 @@ export default async function subagentsExtension(
       limits,
       jobs,
       deliveries,
+      pendingMessages,
+      () => parentAgentActive,
       () => silentMode,
       () => shuttingDown,
       supportsAgentShellModelDiscovery(),
