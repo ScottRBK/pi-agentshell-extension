@@ -3,7 +3,7 @@ name = "pi-agent-shell-runtime"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "agent-shell-py==0.2.2",
+    "agent-shell-py==0.3.1",
 ]
 
 [tool.uv]

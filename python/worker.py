@@ -78,9 +78,14 @@ async def main() -> int:
         allowed_tools=allowed_tools,
         session_id=session_id,
     ):
+        event_data = {
+            key: value
+            for key, value in asdict(event).items()
+            if value is not None
+        }
         emit({
             "kind": "event",
-            "event": asdict(event),
+            "event": event_data,
         })
 
         if event.type == "result":

@@ -17,7 +17,7 @@ class WorkerProtocolTest(unittest.TestCase):
     def test_uses_the_guardian_cleanup_agent_shell_release(self) -> None:
        self.assertEqual(
            importlib.metadata.version("agent-shell-py"),
-           "0.2.2",
+           "0.3.1",
        )
 
     def test_lists_agent_types_from_agent_shell(self) -> None:
@@ -64,6 +64,28 @@ class WorkerProtocolTest(unittest.TestCase):
                },
            ],
        )
+
+    def test_lists_advertised_grok_models(self) -> None:
+        completed, messages = self.run_worker({
+            "operation": "list_models",
+            "agent_type": "grok",
+            "cwd": str(PYTHON_DIR),
+        })
+
+        self.assertEqual(
+            completed.returncode,
+            0,
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+        )
+        self.assertEqual(
+            messages,
+            [
+                {
+                    "kind": "models",
+                    "models": ["grok-4.5"],
+                },
+            ],
+        )
 
     def test_fails_when_terminal_result_reports_error(self) -> None:
        request = {

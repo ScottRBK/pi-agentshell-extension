@@ -767,6 +767,7 @@ export default async function indexHarness(): Promise<void> {
   assert.ok(agentTypes);
   assert.ok(agentTypes.length > 0);
   assert.ok(agentTypes.includes("codex"));
+  assert.ok(agentTypes.includes("grok"));
   assert.equal(new Set(agentTypes).size, agentTypes.length);
   assert.deepEqual(
     modelsTool.parameters.properties?.agent_type?.enum,

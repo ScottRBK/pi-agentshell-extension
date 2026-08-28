@@ -5,6 +5,7 @@ import {
     existsSync,
     mkdirSync,
     mkdtempSync,
+    readFileSync,
     rmSync,
     writeFileSync,
 } from "node:fs";
@@ -84,6 +85,7 @@ test("gets supported agent types from AgentShell", async () => {
     const agentTypes = await getSupportedAgentTypes();
     assert.ok(agentTypes.length > 0);
     assert.ok(agentTypes.includes("codex"));
+    assert.ok(agentTypes.includes("grok"));
     assert.ok(agentTypes.every((agentType) => agentType.trim().length > 0));
     assert.equal(new Set(agentTypes).size, agentTypes.length);
 });
@@ -267,6 +269,60 @@ test("runs the worker and returns its result", { timeout: 5_000 }, async () => {
         } else {
             process.env.PATH = previousPath;
         }
+    }
+});
+
+test("runs Grok through the AgentShell worker", { timeout: 5_000 }, async () => {
+    const temporaryDirectory = mkdtempSync(
+        join(tmpdir(), "pi-agentshell-grok-"),
+    );
+    const argumentsFile = join(temporaryDirectory, "arguments");
+    const previousPath = process.env.PATH;
+    const previousArgumentsFile = process.env.FAKE_GROK_ARGS_FILE;
+    process.env.PATH = FAKE_BIN;
+    process.env.FAKE_GROK_ARGS_FILE = argumentsFile;
+
+    try {
+        const result = await runAgentShell({
+            agent_type: "grok",
+            cwd: PYTHON_DIR,
+            prompt: "Reply exactly GROK_OK",
+            model: "grok-4.5",
+            effort: "high",
+            session_id: "existing-grok-session",
+            auto_approve: true,
+            allowed_tools: ["read_file"],
+            disallowed_tools: ["web_search"],
+        });
+        const arguments_ = readFileSync(argumentsFile, "utf8")
+            .split(/\r?\n/)
+            .filter(Boolean);
+
+        assert.equal(result.output, "GROK_OK");
+        assert.equal(result.details.status, "ok");
+        assert.equal(result.details.sessionId, "grok-session");
+        assert.equal(result.details.outputTokens, 9);
+        assert.ok(arguments_.includes("Reply exactly GROK_OK"));
+        assert.ok(arguments_.includes("--always-approve"));
+        assert.ok(arguments_.includes("grok-4.5"));
+        assert.ok(arguments_.includes("high"));
+        assert.ok(arguments_.includes("existing-grok-session"));
+        assert.ok(arguments_.includes("read_file"));
+        assert.ok(arguments_.includes("web_search"));
+    } finally {
+        if (previousPath === undefined) {
+            delete process.env.PATH;
+        } else {
+            process.env.PATH = previousPath;
+        }
+
+        if (previousArgumentsFile === undefined) {
+            delete process.env.FAKE_GROK_ARGS_FILE;
+        } else {
+            process.env.FAKE_GROK_ARGS_FILE = previousArgumentsFile;
+        }
+
+        rmSync(temporaryDirectory, { recursive: true, force: true });
     }
 });
 

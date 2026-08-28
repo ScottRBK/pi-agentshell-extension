@@ -1,0 +1,21 @@
+#!/bin/sh
+
+if [ "$1" = "models" ]; then
+    printf '%s\n' \
+        'Default model: grok-4.5' \
+        'Available models:' \
+        '  * grok-4.5 (default)'
+    exit 0
+fi
+
+if [ -n "$FAKE_GROK_ARGS_FILE" ]; then
+    printf '%s\n' "$@" > "$FAKE_GROK_ARGS_FILE"
+fi
+
+printf '%s\n' \
+    '{"type":"system","subtype":"init","session_id":"grok-session"}' \
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"GROK_OK"}]}}'
+printf '%s%s%s\n' \
+    '{"type":"result","is_error":false,"session_id":"grok-session",' \
+    '"total_cost_usd":0.01,"duration_ms":1200,' \
+    '"usage":{"output_tokens":9}}'

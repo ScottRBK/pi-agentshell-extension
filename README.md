@@ -19,6 +19,7 @@ Pi as a conversation message.
 - Pi
 - [uv](https://docs.astral.sh/uv/getting-started/)
 - Python 3.12 or newer, which uv can provide
+- The chosen coding-agent CLI installed and authenticated, such as Codex, Claude Code, or Grok
 
 ## Installation
 
@@ -55,7 +56,7 @@ The tool accepts the following parameters:
 
 | Parameter | Required | Description |
 | --- | :---: | --- |
-| `agent_type` | Yes | AgentShell agent type, such as `claude_code` or `codex`. |
+| `agent_type` | Yes | AgentShell agent type, such as `claude_code`, `codex`, or `grok`. |
 | `task_name` | Yes | Short display name for the job, from 1 to 40 characters. |
 | `prompt` | Yes | Task given to the subagent. |
 | `cwd` | No | Working directory; defaults to Pi's current working directory. |
