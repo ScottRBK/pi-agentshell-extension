@@ -17,7 +17,7 @@ class WorkerProtocolTest(unittest.TestCase):
     def test_uses_the_guardian_cleanup_agent_shell_release(self) -> None:
        self.assertEqual(
            importlib.metadata.version("agent-shell-py"),
-           "0.3.1",
+           "0.3.2",
        )
 
     def test_lists_agent_types_from_agent_shell(self) -> None:
