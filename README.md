@@ -66,8 +66,78 @@ The tool accepts the following parameters:
 | `auto_approve` | No | Allows automatic tool approval; defaults to `false`. |
 | `allowed_tools` | No | Tool allow-list; support varies by agent. |
 | `disallowed_tools` | No | Tool deny-list; support varies by agent. |
+| `interactive` | No | Open the native agent UI in a neighbouring tmux pane; default `false`. |
+| `stay_open` | No | Keep the interactive pane after delivering its result; default `false`. |
+| `inactivity_timeout` | No | Seconds of inactivity before inferred completion; default `60`. |
+| `inactivity_enabled` | No | Enable inactivity completion for agents without a reliable event. |
 
 AgentShell warnings are included in the completion message when an agent cannot enforce a control.
+
+### Interactive Tmux Panes
+
+Start Pi inside tmux, then ask it to launch a subagent with `interactive: true`. The native agent UI
+opens in a pane to the right. Switch to that pane using your normal tmux bindings to watch progress,
+answer permission prompts, or type steering directly to the agent. Headless delegation remains the
+default. Requesting interactive mode outside tmux produces an error.
+
+For example:
+
+> Ask Codex to review this project in a tmux pane, and keep the pane open when it finishes.
+
+Pi should pass `interactive: true` and `stay_open: true` for that request. Normally the pane closes
+when the result is delivered. With `stay_open`, Pi receives the first result while the native UI
+remains available for further conversation while the agent is running, or viewing after it exits.
+Later turns in that pane do not send additional job results to Pi. Retained panes are closed when
+their owning Pi session shuts down.
+
+Completion uses a reliable agent event when available. Otherwise, the extension waits for sustained
+inactivity: 60 seconds by default. Observable activity, including visible steering, resets the
+timer. Recognised permission and login prompts prevent automatic closure. Inactivity is an estimate:
+a quiet agent can still be working, and unfamiliar prompts or busy indicators may not be recognised.
+Increase the timeout for tasks with long quiet periods. Results inferred from inactivity carry a
+warning.
+
+Structured answer text is returned when available. Otherwise, the result contains a labelled
+terminal capture, which can include interface text and may omit output that has scrolled away.
+
+**Known constraint: interactive Codex uses terminal capture.** Its completion notifications can
+contain a background-generated title instead of the requested answer. As an interim measure, the
+extension ignores those notifications and returns terminal text after sustained inactivity, using
+the same configurable 60-second default. New interactive Codex runs do not return a verified session
+ID for resumption. Monitoring, steering, and `stay_open` remain available.
+Headless Codex is unaffected.
+With `inactivity_enabled: false`, these runs wait for process exit or cancellation instead of
+inferred completion. Process exit alone is not treated as a successful answer.
+Track removal of this workaround in [extension issue #6][codex-capture-issue], linked to
+[Codex issue #43384][codex-notify-issue].
+Structured Codex results will be restored only after a released upstream fix has been validated
+against background title notifications and normal answers.
+
+[codex-capture-issue]: https://github.com/ScottRBK/pi-agentshell-extension/issues/6
+[codex-notify-issue]: https://github.com/openai/codex/issues/43384
+
+Interactive mode keeps native permission prompts enabled. `auto_approve: true` and
+`disallowed_tools` are rejected; `allowed_tools` is supported only where the interactive agent
+adapter can enforce it. The AgentShell interactive API is experimental and requires v0.4.0.
+
+Set defaults in `~/.pi/agent/extensions/agentshell.json` (or the same path under your custom Pi
+agent directory). These are the built-in values:
+
+```json
+{
+  "interactive": {
+    "enabled": false,
+    "stay_open": false,
+    "inactivity_timeout": 60,
+    "inactivity_enabled": true
+  }
+}
+```
+
+Overrides may be partial, and this section can sit alongside the output-limit settings below.
+Launch arguments override configuration; configuration overrides built-in defaults. Run `/reload`
+after changing the file. Setting `inactivity_enabled: false` disables inferred completion; agents
+without reliable completion events then remain active until they exit or are cancelled.
 
 ### Discovering Models
 
@@ -150,6 +220,11 @@ output.
 
 Every successful completion message ends with the subagent's session ID:
 
+> **Warning:** Interactive subagents are an exception: a session ID is not always guaranteed.
+> The harness may not provide one before inactivity completion. Interactive Codex currently omits
+> notification IDs because they may belong to a background title task instead of your conversation.
+> Without a session ID, Pi cannot offer resumption of that run.
+
 ```
 Reviewed the project and found two bugs.
 
@@ -208,6 +283,20 @@ Overrides may be partial. Values are positive whole numbers in bytes. `maxOutput
 ```bash
 pi remove npm:@scottrbk/pi-agentshell-extension
 ```
+
+## Development Tests
+
+Install Pi, uv, and tmux, then run:
+
+```bash
+uv sync --project python --locked
+env -u PI_AGENT_SHELL_CHILD npm test
+npm run test:python
+```
+
+Interactive integration tests use dedicated tmux sockets and deterministic CLI fixtures. They
+exercise real pane input, result delivery, and cleanup without making model requests. Never run
+test cleanup against your normal tmux server.
 
 ## License
 

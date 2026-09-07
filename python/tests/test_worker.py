@@ -14,10 +14,10 @@ WORKER = PYTHON_DIR / "worker.py"
 FAKE_BIN = PYTHON_DIR / "tests" / "fixtures" / "bin"
 
 class WorkerProtocolTest(unittest.TestCase):
-    def test_uses_the_guardian_cleanup_agent_shell_release(self) -> None:
+    def test_uses_the_interactive_agent_shell_release(self) -> None:
        self.assertEqual(
            importlib.metadata.version("agent-shell-py"),
-           "0.3.2",
+           "0.4.0",
        )
 
     def test_lists_agent_types_from_agent_shell(self) -> None:

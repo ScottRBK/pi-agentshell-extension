@@ -18,6 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
     getAgentShellModels,
     getSupportedAgentTypes,
+    closeAgentShellWorkers,
     isAgentShellRuntimeInstalled,
     runAgentShell,
     supportsAgentShellModelDiscovery,
@@ -44,6 +45,161 @@ async function waitForFile(path: string): Promise<void> {
         await delay(10);
     }
 }
+
+test("opens an interactive worker without closing stdin and retains it until cleanup", {
+    timeout: 10_000,
+}, async () => {
+    // Arrange
+    const temporaryExtension = mkdtempSync(
+        join(tmpdir(), "pi-agentshell-interactive-runner-"),
+    );
+    const temporaryBin = join(
+        temporaryExtension,
+        "python",
+        ".venv",
+        "bin",
+    );
+    const startedFile = join(temporaryExtension, "started");
+    const requestFile = join(temporaryExtension, "request");
+    const closedFile = join(temporaryExtension, "closed");
+    const previousTmux = process.env.TMUX;
+    const previousTmuxPane = process.env.TMUX_PANE;
+    const previousStarted = process.env.FAKE_INTERACTIVE_STARTED_FILE;
+    const previousRequest = process.env.FAKE_INTERACTIVE_REQUEST_FILE;
+    const previousClosed = process.env.FAKE_INTERACTIVE_CLOSED_FILE;
+    let temporaryRunner: typeof import("../runner.ts") | undefined;
+
+    mkdirSync(temporaryBin, { recursive: true });
+    copyFileSync(
+        join(ROOT, "runner.ts"),
+        join(temporaryExtension, "runner.ts"),
+    );
+    copyFileSync(
+        join(ROOT, "limits.ts"),
+        join(temporaryExtension, "limits.ts"),
+    );
+    const fakePython = join(temporaryBin, "python");
+    writeFileSync(
+        fakePython,
+        "#!/bin/sh\n" +
+            "IFS= read -r request || exit 1\n" +
+            ": > \"$FAKE_INTERACTIVE_STARTED_FILE\"\n" +
+            "printf '%s\\n' \"$request\" > \"$FAKE_INTERACTIVE_REQUEST_FILE\"\n" +
+            "printf '%s\\n' '{\"kind\":\"event\",\"event\":{\"type\":\"text\"," +
+                "\"content\":\"interactive response\"}}'\n" +
+            "printf '%s\\n' '{\"kind\":\"event\",\"event\":{\"type\":\"result\"," +
+                "\"content\":\"ok\"}}'\n" +
+            "printf '%s\\n' '{\"kind\":\"complete\"}'\n" +
+            "while IFS= read -r _line; do :; done\n" +
+            ": > \"$FAKE_INTERACTIVE_CLOSED_FILE\"\n",
+        "utf8",
+    );
+    chmodSync(fakePython, 0o755);
+    process.env.TMUX = "tmux-test";
+    process.env.TMUX_PANE = "%1";
+    process.env.FAKE_INTERACTIVE_STARTED_FILE = startedFile;
+    process.env.FAKE_INTERACTIVE_REQUEST_FILE = requestFile;
+    process.env.FAKE_INTERACTIVE_CLOSED_FILE = closedFile;
+
+    try {
+        temporaryRunner = await import(
+            pathToFileURL(join(temporaryExtension, "runner.ts")).href,
+        );
+
+        // Act
+        const execution = temporaryRunner.runAgentShell({
+            agent_type: "codex",
+            cwd: PYTHON_DIR,
+            prompt: "Use the native pane",
+            interactive: true,
+            stay_open: true,
+            inactivity_timeout: 12.5,
+            inactivity_enabled: false,
+        });
+        await waitForFile(startedFile);
+        const result = await execution;
+
+        // Assert
+        assert.equal(result.output, "interactive response");
+        assert.equal(result.details.status, "ok");
+        assert.deepEqual(JSON.parse(readFileSync(requestFile, "utf8")), {
+            agent_type: "codex",
+            cwd: PYTHON_DIR,
+            prompt: "Use the native pane",
+            interactive: true,
+            stay_open: true,
+            inactivity_timeout: 12.5,
+            inactivity_enabled: false,
+        });
+        assert.equal(existsSync(closedFile), false);
+
+        await temporaryRunner.closeAgentShellWorkers();
+        await waitForFile(closedFile);
+    } finally {
+        await temporaryRunner?.closeAgentShellWorkers();
+        await closeAgentShellWorkers();
+        if (previousTmux === undefined) {
+            delete process.env.TMUX;
+        } else {
+            process.env.TMUX = previousTmux;
+        }
+        if (previousTmuxPane === undefined) {
+            delete process.env.TMUX_PANE;
+        } else {
+            process.env.TMUX_PANE = previousTmuxPane;
+        }
+        if (previousStarted === undefined) {
+            delete process.env.FAKE_INTERACTIVE_STARTED_FILE;
+        } else {
+            process.env.FAKE_INTERACTIVE_STARTED_FILE = previousStarted;
+        }
+        if (previousRequest === undefined) {
+            delete process.env.FAKE_INTERACTIVE_REQUEST_FILE;
+        } else {
+            process.env.FAKE_INTERACTIVE_REQUEST_FILE = previousRequest;
+        }
+        if (previousClosed === undefined) {
+            delete process.env.FAKE_INTERACTIVE_CLOSED_FILE;
+        } else {
+            process.env.FAKE_INTERACTIVE_CLOSED_FILE = previousClosed;
+        }
+        rmSync(temporaryExtension, { recursive: true, force: true });
+    }
+});
+
+test("rejects interactive launches without both tmux environment variables", async () => {
+    const previousTmux = process.env.TMUX;
+    const previousTmuxPane = process.env.TMUX_PANE;
+    process.env.TMUX = "";
+    process.env.TMUX_PANE = "";
+
+    try {
+        await assert.rejects(
+            runAgentShell({
+                agent_type: "codex",
+                cwd: PYTHON_DIR,
+                prompt: "Requires a pane",
+                interactive: true,
+            }),
+            {
+                message:
+                    "Interactive AgentShell runs require a valid tmux environment: " +
+                    "both TMUX and TMUX_PANE must be non-empty.",
+            },
+        );
+    } finally {
+        if (previousTmux === undefined) {
+            delete process.env.TMUX;
+        } else {
+            process.env.TMUX = previousTmux;
+        }
+        if (previousTmuxPane === undefined) {
+            delete process.env.TMUX_PANE;
+        } else {
+            process.env.TMUX_PANE = previousTmuxPane;
+        }
+    }
+});
 
 test("keeps the AgentShell runtime available without model discovery", async () => {
     const temporaryExtension = mkdtempSync(
@@ -1047,5 +1203,75 @@ test("aborts a running AgentShell worker", { timeout: 10_000 }, async () => {
         }
 
         rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+});
+
+test("bounds cancellation when a worker ignores interrupt signals", {
+    timeout: 10_000,
+}, async () => {
+    const temporaryExtension = mkdtempSync(
+        join(tmpdir(), "pi-agentshell-unresponsive-runner-"),
+    );
+    const temporaryBin = join(
+        temporaryExtension,
+        "python",
+        ".venv",
+        "bin",
+    );
+    const startedFile = join(temporaryExtension, "started");
+    const previousStarted = process.env.FAKE_UNRESPONSIVE_STARTED_FILE;
+    let temporaryRunner: typeof import("../runner.ts") | undefined;
+
+    try {
+        mkdirSync(temporaryBin, { recursive: true });
+        copyFileSync(
+            join(ROOT, "runner.ts"),
+            join(temporaryExtension, "runner.ts"),
+        );
+        copyFileSync(
+            join(ROOT, "limits.ts"),
+            join(temporaryExtension, "limits.ts"),
+        );
+        const fakePython = join(temporaryBin, "python");
+        writeFileSync(
+            fakePython,
+            "#!/bin/sh\n" +
+                "IFS= read -r request || [ -n \"$request\" ] || exit 1\n" +
+                ": > \"$FAKE_UNRESPONSIVE_STARTED_FILE\"\n" +
+                "trap '' INT\n" +
+                "while :; do :; done\n",
+            "utf8",
+        );
+        chmodSync(fakePython, 0o755);
+        process.env.FAKE_UNRESPONSIVE_STARTED_FILE = startedFile;
+
+        temporaryRunner = await import(
+            pathToFileURL(join(temporaryExtension, "runner.ts")).href,
+        );
+
+        const controller = new AbortController();
+        const execution = temporaryRunner.runAgentShell({
+            agent_type: "codex",
+            cwd: PYTHON_DIR,
+            prompt: "Ignore cancellation",
+        }, controller.signal);
+        await waitForFile(startedFile);
+
+        const abortedAt = Date.now();
+        controller.abort();
+
+        await assert.rejects(execution, { message: "aborted" });
+        assert.ok(
+            Date.now() - abortedAt < 5_000,
+            "an unresponsive worker must be forcefully terminated",
+        );
+    } finally {
+        await temporaryRunner?.closeAgentShellWorkers();
+        if (previousStarted === undefined) {
+            delete process.env.FAKE_UNRESPONSIVE_STARTED_FILE;
+        } else {
+            process.env.FAKE_UNRESPONSIVE_STARTED_FILE = previousStarted;
+        }
+        rmSync(temporaryExtension, { recursive: true, force: true });
     }
 });

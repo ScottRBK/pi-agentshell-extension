@@ -7,7 +7,10 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
-import { loadAgentShellLimits } from "./config.ts";
+import {
+  loadAgentShellConfig,
+  type AgentShellInteractiveConfig,
+} from "./config.ts";
 import {
   JobRegistry,
   type JobActivity,
@@ -17,10 +20,12 @@ import {
 import type { AgentShellLimits } from "./limits.ts";
 import {
   AGENT_SHELL_PROJECT_DIRECTORY,
+  closeAgentShellWorkers,
   getAgentShellModels,
   getSupportedAgentTypes,
   isAgentShellRuntimeInstalled,
   runAgentShell,
+  supportsAgentShellInteractive,
   supportsAgentShellModelDiscovery,
   type RunResult,
 } from "./runner.ts";
@@ -65,6 +70,31 @@ function setupCommand(): string {
     `"${AGENT_SHELL_PROJECT_DIRECTORY}"`,
     "--locked",
   ].join(" ");
+}
+
+interface InteractiveLaunchSettings {
+  interactive: boolean;
+  stay_open: boolean;
+  inactivity_timeout: number;
+  inactivity_enabled: boolean;
+}
+
+function resolveInteractiveLaunchSettings(
+  params: Partial<InteractiveLaunchSettings>,
+  config: AgentShellInteractiveConfig,
+): InteractiveLaunchSettings {
+  const interactive = params.interactive ?? config.enabled;
+
+  return {
+    interactive,
+    stay_open: interactive
+      ? params.stay_open ?? config.stay_open
+      : false,
+    inactivity_timeout: params.inactivity_timeout ??
+      config.inactivity_timeout,
+    inactivity_enabled: params.inactivity_enabled ??
+      config.inactivity_enabled,
+  };
 }
 
 function formatRunOutput(result: RunResult): string {
@@ -666,6 +696,7 @@ function registerSubagentStatusTool(
 async function registerSubagentTool(
   pi: ExtensionAPI,
   limits: AgentShellLimits,
+  interactiveConfig: AgentShellInteractiveConfig,
   jobs: JobRegistry,
   deliveries: Map<string, TerminalJobStatus>,
   pendingMessages: PendingTerminalMessage[],
@@ -673,6 +704,7 @@ async function registerSubagentTool(
   isSilentMode: () => boolean,
   isShuttingDown: () => boolean,
   modelDiscoverySupported: boolean,
+  interactiveSupported: boolean,
 ): Promise<void> {
   const agentTypes = await getSupportedAgentTypes(limits);
 
@@ -732,14 +764,17 @@ async function registerSubagentTool(
       auto_approve: Type.Optional(Type.Boolean({
         description:
           "Allow the subagent to approve tool use automatically. " +
-          "Defaults to false.",
+          "Defaults to false for headless runs. Interactive runs use " +
+          "the agent's native permission prompts.",
       })),
       allowed_tools: Type.Optional(Type.Array(
         Type.String({ minLength: 1 }),
         {
           minItems: 1,
           description:
-            "Tool names the subagent may use, when supported",
+            "Tool names the subagent may use for headless runs, when " +
+            "supported. Interactive runs use native permission controls " +
+            "and reject unsupported options.",
         },
       )),
       disallowed_tools: Type.Optional(Type.Array(
@@ -747,9 +782,36 @@ async function registerSubagentTool(
         {
           minItems: 1,
           description:
-            "Tool names the subagent must not use, when supported",
+            "Tool names the subagent must not use for headless runs, when " +
+            "supported. Interactive runs use native permission controls " +
+            "and reject unsupported options.",
         },
       )),
+      interactive: Type.Optional(Type.Boolean({
+        description:
+          "Run the agent's native interactive UI in a neighbouring tmux " +
+          "pane. Requires TMUX and TMUX_PANE. Defaults to the configured " +
+          "interactive.enabled value.",
+      })),
+      stay_open: Type.Optional(Type.Boolean({
+        description:
+          "Keep an interactive pane open after its result is delivered. " +
+          "Applies only to interactive runs and defaults to the configured " +
+          "interactive.stay_open value.",
+      })),
+      inactivity_timeout: Type.Optional(Type.Number({
+        exclusiveMinimum: 0,
+        description:
+          "Positive number of seconds used to infer completion after an " +
+          "inactive interactive pane when inactivity is enabled. Defaults " +
+          "to the configured interactive.inactivity_timeout value.",
+      })),
+      inactivity_enabled: Type.Optional(Type.Boolean({
+        description:
+          "Enable automatic closure after inactivity_timeout for interactive " +
+          "runs. Defaults to the configured interactive.inactivity_enabled " +
+          "value.",
+      })),
     }),
 
     renderCall(args, theme) {
@@ -780,6 +842,19 @@ async function registerSubagentTool(
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const silent = isSilentMode();
+      const interactive = resolveInteractiveLaunchSettings(
+        params,
+        interactiveConfig,
+      );
+
+      if (interactive.interactive && !interactiveSupported) {
+        throw new Error([
+          "Interactive AgentShell runs need an updated runtime.",
+          `Run: ${setupCommand()}`,
+          "Then restart Pi or run /reload.",
+        ].join("\n"));
+      }
+
       const job = jobs.start(
         (signal, jobId) =>
           runAgentShell(
@@ -793,6 +868,10 @@ async function registerSubagentTool(
               auto_approve: params.auto_approve,
               allowed_tools: params.allowed_tools,
               disallowed_tools: params.disallowed_tools,
+              interactive: interactive.interactive,
+              stay_open: interactive.stay_open,
+              inactivity_timeout: interactive.inactivity_timeout,
+              inactivity_enabled: interactive.inactivity_enabled,
             },
             signal,
             (update) => {
@@ -915,7 +994,8 @@ export default async function subagentsExtension(
     return;
   }
 
-  const limits = loadAgentShellLimits(getAgentDir());
+  const config = loadAgentShellConfig(getAgentDir());
+  const limits: AgentShellLimits = config;
   const jobs = new JobRegistry(limits.maxOutputBytes);
   const deliveries = new Map<string, TerminalJobStatus>();
   const pendingMessages: PendingTerminalMessage[] = [];
@@ -966,11 +1046,12 @@ export default async function subagentsExtension(
     }
   });
 
-  pi.on("session_shutdown", (_event, ctx) => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     parentAgentActive = false;
     pendingMessages.length = 0;
     shuttingDown = true;
     jobs.cancelAll();
+    await closeAgentShellWorkers();
     jobs.clear();
     deliveries.clear();
     safelyUpdateJobWidget(ctx, jobs, deliveries);
@@ -1058,6 +1139,7 @@ export default async function subagentsExtension(
     registerSubagentTool(
       pi,
       limits,
+      config.interactive,
       jobs,
       deliveries,
       pendingMessages,
@@ -1065,24 +1147,55 @@ export default async function subagentsExtension(
       () => silentMode,
       () => shuttingDown,
       supportsAgentShellModelDiscovery(),
+      supportsAgentShellInteractive(),
     );
 
   if (isAgentShellRuntimeInstalled()) {
     const modelDiscoverySupported = supportsAgentShellModelDiscovery();
-    await registerTool();
+    const interactiveSupported = supportsAgentShellInteractive();
+    await registerSubagentTool(
+      pi,
+      limits,
+      config.interactive,
+      jobs,
+      deliveries,
+      pendingMessages,
+      () => parentAgentActive,
+      () => silentMode,
+      () => shuttingDown,
+      modelDiscoverySupported,
+      interactiveSupported,
+    );
 
-    if (!modelDiscoverySupported) {
+    if (
+      !modelDiscoverySupported ||
+      (config.interactive.enabled && !interactiveSupported)
+    ) {
       pi.on("session_start", (_event, ctx) => {
         if (!ctx.hasUI) {
           return;
         }
 
-        ctx.ui.notify(
-          [
+        const notices = [];
+
+        if (!modelDiscoverySupported) {
+          notices.push([
             "Model discovery needs an updated AgentShell runtime.",
             `Run: ${setupCommand()}`,
             "Then restart Pi or run /reload.",
-          ].join("\n"),
+          ].join("\n"));
+        }
+
+        if (config.interactive.enabled && !interactiveSupported) {
+          notices.push([
+            "Interactive runs need an updated AgentShell runtime.",
+            `Run: ${setupCommand()}`,
+            "Then restart Pi or run /reload.",
+          ].join("\n"));
+        }
+
+        ctx.ui.notify(
+          notices.join("\n\n"),
           "warning",
         );
       });

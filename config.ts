@@ -13,6 +13,25 @@ const LIMIT_SETTINGS = new Set<keyof AgentShellLimits>([
   "maxStderrBytes",
 ]);
 
+export interface AgentShellInteractiveConfig {
+  enabled: boolean;
+  stay_open: boolean;
+  inactivity_timeout: number;
+  inactivity_enabled: boolean;
+}
+
+export interface AgentShellConfig extends AgentShellLimits {
+  interactive: AgentShellInteractiveConfig;
+}
+
+export const DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG:
+  AgentShellInteractiveConfig = {
+    enabled: false,
+    stay_open: false,
+    inactivity_timeout: 60,
+    inactivity_enabled: true,
+  };
+
 function invalidConfiguration(path: string, reason: string): Error {
   return new Error(
     `Invalid AgentShell configuration at ${path}: ${reason}`,
@@ -22,6 +41,19 @@ function invalidConfiguration(path: string, reason: string): Error {
 export function loadAgentShellLimits(
   agentDirectory: string,
 ): AgentShellLimits {
+  const config = loadAgentShellConfig(agentDirectory);
+
+  return {
+    maxOutputBytes: config.maxOutputBytes,
+    maxProtocolBytes: config.maxProtocolBytes,
+    maxMessageBytes: config.maxMessageBytes,
+    maxStderrBytes: config.maxStderrBytes,
+  };
+}
+
+export function loadAgentShellConfig(
+  agentDirectory: string,
+): AgentShellConfig {
   const configPath = join(
     agentDirectory,
     "extensions",
@@ -29,7 +61,10 @@ export function loadAgentShellLimits(
   );
 
   if (!existsSync(configPath)) {
-    return { ...DEFAULT_AGENT_SHELL_LIMITS };
+    return {
+      ...DEFAULT_AGENT_SHELL_LIMITS,
+      interactive: { ...DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG },
+    };
   }
 
   let parsed: unknown;
@@ -60,8 +95,69 @@ export function loadAgentShellLimits(
 
   const overrides = parsed as Record<string, unknown>;
   const limits = { ...DEFAULT_AGENT_SHELL_LIMITS };
+  const interactive = { ...DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG };
 
   for (const [setting, value] of Object.entries(overrides)) {
+    if (setting === "interactive") {
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        Array.isArray(value)
+      ) {
+        throw invalidConfiguration(
+          configPath,
+          "interactive must be a JSON object",
+        );
+      }
+
+      for (const [interactiveSetting, interactiveValue] of Object.entries(
+        value,
+      )) {
+        if (
+          !(
+            interactiveSetting === "enabled" ||
+            interactiveSetting === "stay_open" ||
+            interactiveSetting === "inactivity_timeout" ||
+            interactiveSetting === "inactivity_enabled"
+          )
+        ) {
+          throw invalidConfiguration(
+            configPath,
+            `unknown interactive setting "${interactiveSetting}"`,
+          );
+        }
+
+        if (
+          interactiveSetting === "inactivity_timeout"
+        ) {
+          if (
+            typeof interactiveValue !== "number" ||
+            !Number.isFinite(interactiveValue) ||
+            interactiveValue <= 0
+          ) {
+            throw invalidConfiguration(
+              configPath,
+              `${interactiveSetting} must be a positive finite number`,
+            );
+          }
+
+          interactive.inactivity_timeout = interactiveValue;
+          continue;
+        }
+
+        if (typeof interactiveValue !== "boolean") {
+          throw invalidConfiguration(
+            configPath,
+            `${interactiveSetting} must be a boolean`,
+          );
+        }
+
+        interactive[interactiveSetting] = interactiveValue;
+      }
+
+      continue;
+    }
+
     if (!LIMIT_SETTINGS.has(setting as keyof AgentShellLimits)) {
       throw invalidConfiguration(
         configPath,
@@ -95,5 +191,5 @@ export function loadAgentShellLimits(
     }
   }
 
-  return limits;
+  return { ...limits, interactive };
 }

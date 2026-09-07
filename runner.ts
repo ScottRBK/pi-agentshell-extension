@@ -34,6 +34,10 @@ export interface AgentRequest {
   auto_approve?: boolean;
   allowed_tools?: string[];
   disallowed_tools?: string[];
+  interactive?: boolean;
+  stay_open?: boolean;
+  inactivity_timeout?: number;
+  inactivity_enabled?: boolean;
 }
 
 export interface RunDetails {
@@ -75,6 +79,7 @@ interface WorkerProcessResult {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  completionMarker: boolean;
 }
 
 interface AgentTypesMessage {
@@ -88,7 +93,109 @@ interface ModelsMessage {
   models?: unknown;
 }
 
-type WorkerLineHandler = (line: string) => void;
+type WorkerLineHandler = (line: string) => boolean | void;
+
+interface WorkerRecord {
+  child: ReturnType<typeof spawn>;
+  closePromise: Promise<number | null>;
+}
+
+const ACTIVE_WORKERS = new Set<WorkerRecord>();
+
+function childHasExited(child: ReturnType<typeof spawn>): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function closeWorkerInput(child: ReturnType<typeof spawn>): void {
+  const stdin = child.stdin;
+
+  if (stdin === null || stdin.destroyed || stdin.writableEnded) {
+    return;
+  }
+
+  try {
+    stdin.end();
+  } catch {
+    // The child may have exited between the state check and end().
+  }
+}
+
+function signalWorker(
+  child: ReturnType<typeof spawn>,
+  signal: NodeJS.Signals,
+): void {
+  try {
+    child.kill(signal);
+  } catch {
+    // The child may have exited before it could be signalled.
+  }
+}
+
+async function terminateWorker(
+  worker: WorkerRecord,
+  initialSignal?: NodeJS.Signals,
+): Promise<void> {
+  closeWorkerInput(worker.child);
+
+  if (initialSignal !== undefined) {
+    signalWorker(worker.child, initialSignal);
+  }
+
+  await waitForCloseOrTimeout(worker, 2_000);
+
+  if (childHasExited(worker.child)) {
+    await waitForCloseOrTimeout(worker, 2_000);
+    return;
+  }
+
+  signalWorker(worker.child, "SIGTERM");
+  await waitForCloseOrTimeout(worker, 2_000);
+
+  if (!childHasExited(worker.child)) {
+    signalWorker(worker.child, "SIGKILL");
+    await waitForCloseOrTimeout(worker, 2_000);
+  }
+}
+
+async function closeWorker(worker: WorkerRecord): Promise<void> {
+  await terminateWorker(worker);
+}
+
+async function waitForCloseOrTimeout(
+  worker: WorkerRecord,
+  milliseconds: number,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, milliseconds);
+    timer.unref?.();
+  });
+
+  try {
+    await Promise.race([
+      worker.closePromise.catch(() => undefined),
+      timeout,
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/** Close all headless and retained AgentShell worker processes owned by this extension. */
+export async function closeAgentShellWorkers(): Promise<void> {
+  await Promise.all(Array.from(ACTIVE_WORKERS, closeWorker));
+}
+
+// A parent process can exit while a retained interactive worker is still waiting on stdin.
+// Closing the lifecycle pipe lets the Python worker perform its normal interactive cleanup; the
+// asynchronous session_shutdown handler handles signal escalation while the parent is alive.
+process.once("exit", () => {
+  for (const worker of ACTIVE_WORKERS) {
+    closeWorkerInput(worker.child);
+  }
+});
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
@@ -204,11 +311,58 @@ export function supportsAgentShellModelDiscovery(): boolean {
   return check.status === 0;
 }
 
+export function supportsAgentShellInteractive(): boolean {
+  if (!isAgentShellRuntimeInstalled()) {
+    return false;
+  }
+
+  const check = spawnSync(
+    PYTHON,
+    [
+      "-I",
+      "-c",
+      "from agent_shell import TmuxExecutionHost, TmuxPlacement; " +
+        "from agent_shell.shell import AgentShell; " +
+        "assert callable(getattr(AgentShell, 'open_interactive', None)); " +
+        "assert callable(TmuxExecutionHost); " +
+        "assert callable(TmuxPlacement.split_pane)",
+    ],
+    { stdio: "ignore", timeout: 5_000 },
+  );
+
+  return check.status === 0;
+}
+
+function interactiveEnvironmentError(): Error {
+  return new Error(
+    "Interactive AgentShell runs require a valid tmux environment: " +
+      "both TMUX and TMUX_PANE must be non-empty.",
+  );
+}
+
+function hasInteractiveRequest(request: object): boolean {
+  return (
+    typeof request === "object" &&
+    request !== null &&
+    "interactive" in request &&
+    request.interactive === true
+  );
+}
+
+function hasRetainedInteractiveRequest(request: object): boolean {
+  return (
+    hasInteractiveRequest(request) &&
+    "stay_open" in request &&
+    request.stay_open === true
+  );
+}
+
 async function invokeWorker(
   request: object,
   signal?: AbortSignal,
   onLine?: WorkerLineHandler,
   limits: AgentShellLimits = DEFAULT_AGENT_SHELL_LIMITS,
+  allowEarlyCompletion = false,
 ): Promise<WorkerProcessResult> {
   if (signal?.aborted) {
     throw new Error("aborted");
@@ -229,11 +383,52 @@ async function invokeWorker(
   const stdoutChunks: Buffer[] = [];
   const stderrChunks: Buffer[] = [];
   const pendingLineChunks: Buffer[] = [];
+  let resolveCompletion: (() => void) | undefined;
+  const completionPromise = new Promise<void>((resolve) => {
+    resolveCompletion = resolve;
+  });
   let protocolBytes = 0;
   let stderrBytes = 0;
   let pendingLineBytes = 0;
   let lineError: unknown;
   let hasLineError = false;
+  let completionMarker = false;
+  let completionReturned = false;
+
+  let worker!: WorkerRecord;
+
+  const exitCodePromise = new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => {
+      ACTIVE_WORKERS.delete(worker);
+      resolve(code);
+    });
+  });
+
+  worker = {
+    child,
+    closePromise: exitCodePromise,
+  };
+  ACTIVE_WORKERS.add(worker);
+
+  // A retained worker continues to run after the job result has been returned. Its close promise
+  // is therefore intentionally observed here so a later process error cannot become unhandled.
+  void exitCodePromise.catch(() => undefined);
+
+  let resolveStopRequested!: () => void;
+  const stopRequested = new Promise<void>((resolve) => {
+    resolveStopRequested = resolve;
+  });
+  let stopPromise: Promise<void> | undefined;
+
+  const requestStop = () => {
+    if (stopPromise !== undefined) {
+      return;
+    }
+
+    stopPromise = terminateWorker(worker, "SIGINT");
+    resolveStopRequested();
+  };
 
   const stopWorker = (error: unknown) => {
     if (hasLineError) {
@@ -242,7 +437,7 @@ async function invokeWorker(
 
     lineError = error;
     hasLineError = true;
-    child.kill("SIGINT");
+    requestStop();
   };
 
   const emitLine = () => {
@@ -263,7 +458,14 @@ async function invokeWorker(
     }
 
     try {
-      onLine(lineBuffer.toString("utf8", 0, contentLength));
+      const isCompletion = onLine?.(
+        lineBuffer.toString("utf8", 0, contentLength),
+      );
+
+      if (isCompletion === true) {
+        completionMarker = true;
+        resolveCompletion?.();
+      }
     } catch (error) {
       stopWorker(error);
     }
@@ -304,7 +506,7 @@ async function invokeWorker(
   };
 
   child.stdout.on("data", (chunk: Buffer) => {
-    if (hasLineError) {
+    if (hasLineError || completionReturned) {
       return;
     }
 
@@ -328,13 +530,13 @@ async function invokeWorker(
   });
 
   child.stdout.once("end", () => {
-    if (!hasLineError && pendingLineBytes > 0) {
+    if (!hasLineError && !completionReturned && pendingLineBytes > 0) {
       emitLine();
     }
   });
 
   child.stderr.on("data", (chunk: Buffer) => {
-    if (hasLineError) {
+    if (hasLineError || completionReturned) {
       return;
     }
 
@@ -355,17 +557,20 @@ async function invokeWorker(
     }
   });
 
-  const exitCodePromise = new Promise<number | null>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("close", (code) => resolve(code));
-
-    // A fast startup failure may close stdin before we finish writing.
-    child.stdin.on("error", () => {});
-    child.stdin.end(JSON.stringify(request));
-  });
+  // A fast startup failure may close stdin before we finish writing.
+  child.stdin.on("error", () => {});
+  try {
+    if (hasInteractiveRequest(request)) {
+      child.stdin.write(`${JSON.stringify(request)}\n`);
+    } else {
+      child.stdin.end(JSON.stringify(request));
+    }
+  } catch (error) {
+    stopWorker(error);
+  }
 
   const abortWorker = () => {
-    child.kill("SIGINT");
+    requestStop();
   };
 
   if (signal?.aborted) {
@@ -377,7 +582,41 @@ async function invokeWorker(
   let exitCode: number | null;
 
   try {
-    exitCode = await exitCodePromise;
+    const waitForExitOrStop = async (): Promise<number | null> => {
+      const outcome = await Promise.race([
+        exitCodePromise.then((value) => ({
+          kind: "exit" as const,
+          exitCode: value,
+        })),
+        stopRequested.then(() => ({
+          kind: "stop" as const,
+        })),
+      ]);
+
+      if (outcome.kind === "exit") {
+        return outcome.exitCode;
+      }
+
+      await stopPromise;
+      return childHasExited(child) ? child.exitCode : null;
+    };
+
+    if (allowEarlyCompletion) {
+      const outcome = await Promise.race([
+        waitForExitOrStop().then((value) => ({
+          kind: "exit" as const,
+          exitCode: value,
+        })),
+        completionPromise.then(() => ({
+          kind: "completion" as const,
+          exitCode: null,
+        })),
+      ]);
+      exitCode = outcome.exitCode;
+      completionReturned = outcome.kind === "completion";
+    } else {
+      exitCode = await waitForExitOrStop();
+    }
   } finally {
     signal?.removeEventListener("abort", abortWorker);
   }
@@ -394,6 +633,7 @@ async function invokeWorker(
     exitCode,
     stdout: Buffer.concat(stdoutChunks, protocolBytes).toString("utf8"),
     stderr: Buffer.concat(stderrChunks, stderrBytes).toString("utf8"),
+    completionMarker,
   };
 }
 
@@ -521,6 +761,15 @@ export async function runAgentShell(
   onUpdate?: (update: RunUpdate) => void,
   limits: AgentShellLimits = DEFAULT_AGENT_SHELL_LIMITS,
 ): Promise<RunResult> {
+  if (hasInteractiveRequest(request)) {
+    if (
+      !isNonEmptyString(process.env.TMUX) ||
+      !isNonEmptyString(process.env.TMUX_PANE)
+    ) {
+      throw interactiveEnvironmentError();
+    }
+  }
+
   const output: string[] = [];
   const warnings: string[] = [];
   const failureReasons: string[] = [];
@@ -541,7 +790,9 @@ export async function runAgentShell(
     });
   };
 
-  const handleLine = (line: string) => {
+  let completionMarkerSeen = false;
+
+  const handleLine = (line: string): boolean | void => {
     if (!line.trim()) {
       return;
     }
@@ -556,6 +807,32 @@ export async function runAgentShell(
       warnings.push(message.message);
       emitUpdate({ type: "warning", content: message.message });
       return;
+    }
+
+    if (message.kind === "complete") {
+      if (!hasInteractiveRequest(request)) {
+        throw new Error(
+          "AgentShell worker emitted an interactive completion for a " +
+            "headless request",
+        );
+      }
+
+      if (completionMarkerSeen) {
+        throw new Error(
+          "AgentShell worker emitted duplicate interactive completion markers",
+        );
+      }
+
+      completionMarkerSeen = true;
+
+      if (status === undefined) {
+        throw new Error(
+          "AgentShell worker emitted an interactive completion before " +
+            "a terminal result",
+        );
+      }
+
+      return true;
     }
 
     if (message.kind === "fatal") {
@@ -625,9 +902,15 @@ export async function runAgentShell(
     signal,
     handleLine,
     limits,
+    hasRetainedInteractiveRequest(request),
   );
 
-  const runSucceeded = status === "ok" && exitCode === 0;
+  const interactive = hasInteractiveRequest(request);
+  const completionSucceeded = interactive
+    ? completionMarkerSeen &&
+      (exitCode === 0 || hasRetainedInteractiveRequest(request) && exitCode === null)
+    : exitCode === 0;
+  const runSucceeded = status === "ok" && completionSucceeded;
 
   if (!runSucceeded && failureReasons.length > 0) {
     throw new Error(formatFailure(
@@ -636,7 +919,7 @@ export async function runAgentShell(
     ));
   }
 
-  if (exitCode !== 0) {
+  if (!completionSucceeded && exitCode !== 0) {
     const diagnostic = stderr.trim();
     const suffix = diagnostic ? `: ${diagnostic}` : "";
 
@@ -647,6 +930,12 @@ export async function runAgentShell(
 
   if (status === undefined) {
     throw new Error("AgentShell worker exited without a terminal result");
+  }
+
+  if (interactive && !completionMarkerSeen) {
+    throw new Error(
+      "AgentShell worker exited without an interactive completion marker",
+    );
   }
 
   return {

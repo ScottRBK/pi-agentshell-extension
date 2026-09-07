@@ -9,7 +9,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { loadAgentShellLimits } from "../config.ts";
+import {
+  DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG,
+  loadAgentShellConfig,
+  loadAgentShellLimits,
+} from "../config.ts";
 import { DEFAULT_AGENT_SHELL_LIMITS } from "../limits.ts";
 
 function writeConfig(
@@ -34,6 +38,10 @@ test("uses default limits when no config file exists", () => {
       loadAgentShellLimits(agentDirectory),
       DEFAULT_AGENT_SHELL_LIMITS,
     );
+    assert.deepEqual(loadAgentShellConfig(agentDirectory), {
+      ...DEFAULT_AGENT_SHELL_LIMITS,
+      interactive: DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG,
+    });
   } finally {
     rmSync(agentDirectory, { recursive: true, force: true });
   }
@@ -47,6 +55,46 @@ test("loads partial limit overrides from the AgentShell config file", () => {
   try {
     writeConfig(agentDirectory, { maxOutputBytes: 128 * 1024 });
 
+    assert.deepEqual(loadAgentShellLimits(agentDirectory), {
+      ...DEFAULT_AGENT_SHELL_LIMITS,
+      maxOutputBytes: 128 * 1024,
+    });
+  } finally {
+    rmSync(agentDirectory, { recursive: true, force: true });
+  }
+});
+
+test("loads interactive defaults and nested overrides with existing limits", () => {
+  // Arrange
+  const agentDirectory = mkdtempSync(
+    join(tmpdir(), "pi-agentshell-interactive-config-"),
+  );
+
+  try {
+    writeConfig(agentDirectory, {
+      maxOutputBytes: 128 * 1024,
+      interactive: {
+        enabled: true,
+        stay_open: true,
+        inactivity_timeout: 15,
+        inactivity_enabled: false,
+      },
+    });
+
+    // Act
+    const config = loadAgentShellConfig(agentDirectory);
+
+    // Assert
+    assert.deepEqual(config, {
+      ...DEFAULT_AGENT_SHELL_LIMITS,
+      maxOutputBytes: 128 * 1024,
+      interactive: {
+        enabled: true,
+        stay_open: true,
+        inactivity_timeout: 15,
+        inactivity_enabled: false,
+      },
+    });
     assert.deepEqual(loadAgentShellLimits(agentDirectory), {
       ...DEFAULT_AGENT_SHELL_LIMITS,
       maxOutputBytes: 128 * 1024,
