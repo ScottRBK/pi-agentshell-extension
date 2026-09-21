@@ -21,6 +21,50 @@ const INTERACTIVE_HARNESS = join(
   "fixtures",
   "interactive-index-harness.ts",
 );
+const ROSTER_HARNESS = join(ROOT, "tests", "fixtures", "roster-harness.ts");
+
+test("toggles the global roster tool and invocation hint", { timeout: 15_000 }, () => {
+  const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-roster-agent-"));
+  const env = { ...process.env, PI_CODING_AGENT_DIR: agentDirectory };
+  delete env.PI_AGENT_SHELL_CHILD;
+
+  try {
+    mkdirSync(join(agentDirectory, "extensions"));
+    writeFileSync(
+      join(agentDirectory, "extensions", "agentshell.json"),
+      JSON.stringify({ roster: { roles: [{
+        name: "reviewer",
+        description: "Review code for defects",
+        agent_type: "codex",
+        model: "gpt-5",
+        effort: "high",
+      }] } }),
+      "utf8",
+    );
+    const completed = spawnSync(
+      "pi",
+      ["--mode", "rpc", "--offline", "--no-session", "--no-extensions",
+        "--extension", ROSTER_HARNESS],
+      {
+        cwd: ROOT,
+        encoding: "utf8",
+        env,
+        input: '{"type":"get_state","id":"roster-test"}\n',
+        timeout: 10_000,
+      },
+    );
+
+    assert.equal(
+      completed.status,
+      0,
+      `error: ${completed.error?.message}\n` +
+        `stdout:\n${completed.stdout}\nstderr:\n${completed.stderr}`,
+    );
+    assert.match(completed.stderr, /ROSTER_HARNESS_OK/);
+  } finally {
+    rmSync(agentDirectory, { recursive: true, force: true });
+  }
+});
 
 function runInteractiveIndexHarness(oldRuntime = false): ReturnType<typeof spawnSync> {
   const temporaryExtension = mkdtempSync(

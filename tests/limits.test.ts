@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import {
   mkdirSync,
   mkdtempSync,
+  lstatSync,
+  readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,8 +14,10 @@ import { test } from "node:test";
 
 import {
   DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG,
+  DEFAULT_AGENT_SHELL_ROSTER_CONFIG,
   loadAgentShellConfig,
   loadAgentShellLimits,
+  setRosterEnabled,
 } from "../config.ts";
 import { DEFAULT_AGENT_SHELL_LIMITS } from "../limits.ts";
 
@@ -41,6 +46,7 @@ test("uses default limits when no config file exists", () => {
     assert.deepEqual(loadAgentShellConfig(agentDirectory), {
       ...DEFAULT_AGENT_SHELL_LIMITS,
       interactive: DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG,
+      roster: DEFAULT_AGENT_SHELL_ROSTER_CONFIG,
     });
   } finally {
     rmSync(agentDirectory, { recursive: true, force: true });
@@ -94,6 +100,7 @@ test("loads interactive defaults and nested overrides with existing limits", () 
         inactivity_timeout: 15,
         inactivity_enabled: false,
       },
+      roster: DEFAULT_AGENT_SHELL_ROSTER_CONFIG,
     });
     assert.deepEqual(loadAgentShellLimits(agentDirectory), {
       ...DEFAULT_AGENT_SHELL_LIMITS,
@@ -101,6 +108,162 @@ test("loads interactive defaults and nested overrides with existing limits", () 
     });
   } finally {
     rmSync(agentDirectory, { recursive: true, force: true });
+  }
+});
+
+test("persists the global roster switch without changing other settings", () => {
+  const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-roster-"));
+
+  try {
+    const configPath = writeConfig(agentDirectory, {
+      maxOutputBytes: 128 * 1024,
+      roster: {
+        roles: [{
+          name: "reviewer",
+          description: "Review code for defects",
+          agent_type: "codex",
+          model: "gpt-5",
+          effort: "high",
+        }],
+      },
+    });
+
+    setRosterEnabled(agentDirectory, true);
+
+    assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), {
+      maxOutputBytes: 128 * 1024,
+      roster: {
+        roles: [{
+          name: "reviewer",
+          description: "Review code for defects",
+          agent_type: "codex",
+          model: "gpt-5",
+          effort: "high",
+        }],
+        enabled: true,
+      },
+    });
+  } finally {
+    rmSync(agentDirectory, { recursive: true, force: true });
+  }
+});
+
+test("toggles a symlinked config without replacing the link", () => {
+  const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-roster-link-"));
+
+  try {
+    const extensionDirectory = join(agentDirectory, "extensions");
+    const dotfilesDirectory = join(agentDirectory, "dotfiles");
+    const configPath = join(extensionDirectory, "agentshell.json");
+    const targetPath = join(dotfilesDirectory, "agentshell.json");
+    mkdirSync(extensionDirectory);
+    mkdirSync(dotfilesDirectory);
+    writeFileSync(targetPath, JSON.stringify({ roster: { enabled: false } }));
+    symlinkSync(targetPath, configPath);
+
+    setRosterEnabled(agentDirectory, true);
+
+    assert.equal(lstatSync(configPath).isSymbolicLink(), true);
+    assert.deepEqual(JSON.parse(readFileSync(targetPath, "utf8")), {
+      roster: { enabled: true },
+    });
+  } finally {
+    rmSync(agentDirectory, { recursive: true, force: true });
+  }
+});
+
+test("does not replace a broken config symlink", () => {
+  const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-roster-link-"));
+
+  try {
+    const extensionDirectory = join(agentDirectory, "extensions");
+    const configPath = join(extensionDirectory, "agentshell.json");
+    mkdirSync(extensionDirectory);
+    symlinkSync(join(agentDirectory, "missing.json"), configPath);
+
+    assert.throws(() => setRosterEnabled(agentDirectory, true), { code: "ENOENT" });
+    assert.equal(lstatSync(configPath).isSymbolicLink(), true);
+  } finally {
+    rmSync(agentDirectory, { recursive: true, force: true });
+  }
+});
+
+test("enables the roster when the global config file does not exist yet", () => {
+  const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-roster-"));
+
+  try {
+    setRosterEnabled(agentDirectory, true);
+
+    assert.deepEqual(loadAgentShellConfig(agentDirectory).roster, {
+      enabled: true,
+      roles: [],
+    });
+  } finally {
+    rmSync(agentDirectory, { recursive: true, force: true });
+  }
+});
+
+test("loads an advisory roster from the global AgentShell config", () => {
+  const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-roster-"));
+
+  try {
+    writeConfig(agentDirectory, {
+      roster: {
+        enabled: true,
+        roles: [{
+          name: "reviewer",
+          description: "Review code for defects",
+          agent_type: "codex",
+          model: "gpt-5",
+          effort: "high",
+        }],
+      },
+    });
+
+    assert.deepEqual(loadAgentShellConfig(agentDirectory).roster, {
+      enabled: true,
+      roles: [{
+        name: "reviewer",
+        description: "Review code for defects",
+        agent_type: "codex",
+        model: "gpt-5",
+        effort: "high",
+      }],
+    });
+  } finally {
+    rmSync(agentDirectory, { recursive: true, force: true });
+  }
+});
+
+test("rejects incomplete and duplicate roster roles", () => {
+  const cases = [
+    {
+      roles: [{ name: "reviewer", description: "Review code", agent_type: "codex",
+        model: "gpt-5" }],
+      error: "roster.roles[0].effort must be a non-empty string",
+    },
+    {
+      roles: [
+        { name: "reviewer", description: "Review code", agent_type: "codex",
+          model: "gpt-5", effort: "high" },
+        { name: "reviewer", description: "Review tests", agent_type: "codex",
+          model: "gpt-5", effort: "medium" },
+      ],
+      error: 'duplicate roster role name "reviewer"',
+    },
+  ];
+
+  for (const { roles, error } of cases) {
+    const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-roster-"));
+
+    try {
+      const configPath = writeConfig(agentDirectory, { roster: { roles } });
+      assert.throws(() => loadAgentShellConfig(agentDirectory), {
+        message: `Invalid AgentShell configuration at ${configPath}: ${error}`,
+      });
+    } finally {
+      rmSync(agentDirectory, { recursive: true, force: true });
+    }
   }
 });
 

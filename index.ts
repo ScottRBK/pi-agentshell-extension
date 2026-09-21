@@ -9,7 +9,9 @@ import { Type } from "typebox";
 
 import {
   loadAgentShellConfig,
+  setRosterEnabled,
   type AgentShellInteractiveConfig,
+  type AgentShellRosterConfig,
 } from "./config.ts";
 import {
   JobRegistry,
@@ -705,14 +707,15 @@ async function registerSubagentTool(
   isShuttingDown: () => boolean,
   modelDiscoverySupported: boolean,
   interactiveSupported: boolean,
-): Promise<void> {
+  rosterEnabled: boolean,
+): Promise<(enabled: boolean) => void> {
   const agentTypes = await getSupportedAgentTypes(limits);
 
   registerJobMessageRenderer(pi);
   registerJobDeliveryHandler(pi, jobs, deliveries);
   registerSubagentStatusTool(pi, jobs, deliveries);
 
-  pi.registerTool({
+  const registerInvocation = (enabled: boolean): void => pi.registerTool({
     name: "subagent",
     label: "Subagent",
     description: [
@@ -725,6 +728,10 @@ async function registerSubagentTool(
       "Continue other work or remain idle until notified.",
       "The real resumable session ID arrives with the completion result.",
       RESUME_SESSION_GUIDANCE,
+      ...(enabled ? [
+        "Before delegating, check subagent_roster for preferred roles and settings.",
+        "Roster entries are advisory; pass the chosen agent_type, model, and effort explicitly.",
+      ] : []),
     ].join(" "),
     parameters: Type.Object({
       agent_type: StringEnum(agentTypes, {
@@ -947,6 +954,8 @@ async function registerSubagentTool(
     },
   });
 
+  registerInvocation(rosterEnabled);
+
   if (modelDiscoverySupported) {
     registerSubagentModelsTool(pi, agentTypes, limits);
   }
@@ -985,6 +994,27 @@ async function registerSubagentTool(
       };
     },
   });
+
+  return registerInvocation;
+}
+
+function registerRosterTool(pi: ExtensionAPI, roster: AgentShellRosterConfig): void {
+  pi.registerTool({
+    name: "subagent_roster",
+    label: "Subagent roster",
+    description: "List preferred subagent roles and their suggested AgentShell settings.",
+    parameters: Type.Object({}),
+    async execute() {
+      return {
+        content: [{
+          type: "text" as const,
+          text: roster.roles.length === 0
+            ? "No preferred subagent roles are configured."
+            : JSON.stringify(roster.roles, null, 2),
+        }],
+      };
+    },
+  });
 }
 
 export default async function subagentsExtension(
@@ -994,7 +1024,8 @@ export default async function subagentsExtension(
     return;
   }
 
-  const config = loadAgentShellConfig(getAgentDir());
+  const agentDirectory = getAgentDir();
+  const config = loadAgentShellConfig(agentDirectory);
   const limits: AgentShellLimits = config;
   const jobs = new JobRegistry(limits.maxOutputBytes);
   const deliveries = new Map<string, TerminalJobStatus>();
@@ -1002,6 +1033,11 @@ export default async function subagentsExtension(
   let parentAgentActive = false;
   let shuttingDown = false;
   let silentMode = false;
+  let refreshSubagentTool: ((enabled: boolean) => void) | undefined;
+
+  if (config.roster.enabled) {
+    registerRosterTool(pi, config.roster);
+  }
 
   pi.on("agent_start", () => {
     parentAgentActive = true;
@@ -1071,6 +1107,35 @@ export default async function subagentsExtension(
     },
   });
 
+  pi.registerCommand("agentshell-roster", {
+    description: "Toggle the global preferred subagent roster",
+    handler: async (_args, ctx) => {
+      try {
+        const currentRoster = loadAgentShellConfig(agentDirectory).roster;
+        const enabled = !currentRoster.enabled;
+        setRosterEnabled(agentDirectory, enabled);
+        config.roster = { ...currentRoster, enabled };
+
+        if (enabled) {
+          registerRosterTool(pi, config.roster);
+        }
+
+        refreshSubagentTool?.(enabled);
+        const activeTools = pi.getActiveTools();
+        pi.setActiveTools(enabled
+          ? [...new Set([...activeTools, "subagent_roster"])]
+          : activeTools.filter((name) => name !== "subagent_roster"));
+        ctx.ui.notify(
+          enabled ? "Subagent roster is now enabled."
+            : "Subagent roster is now disabled.",
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(`Could not toggle subagent roster: ${errorMessage(error)}`, "error");
+      }
+    },
+  });
+
   pi.registerCommand("agentshell-jobs", {
     description: "List active AgentShell subagent jobs",
     handler: async (_args, ctx) => {
@@ -1135,8 +1200,8 @@ export default async function subagentsExtension(
     },
   });
 
-  const registerTool = () =>
-    registerSubagentTool(
+  const registerTool = async (): Promise<void> => {
+    refreshSubagentTool = await registerSubagentTool(
       pi,
       limits,
       config.interactive,
@@ -1148,12 +1213,14 @@ export default async function subagentsExtension(
       () => shuttingDown,
       supportsAgentShellModelDiscovery(),
       supportsAgentShellInteractive(),
+      config.roster.enabled,
     );
+  };
 
   if (isAgentShellRuntimeInstalled()) {
     const modelDiscoverySupported = supportsAgentShellModelDiscovery();
     const interactiveSupported = supportsAgentShellInteractive();
-    await registerSubagentTool(
+    refreshSubagentTool = await registerSubagentTool(
       pi,
       limits,
       config.interactive,
@@ -1165,6 +1232,7 @@ export default async function subagentsExtension(
       () => shuttingDown,
       modelDiscoverySupported,
       interactiveSupported,
+      config.roster.enabled,
     );
 
     if (

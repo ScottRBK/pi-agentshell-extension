@@ -1,5 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 
 import {
   DEFAULT_AGENT_SHELL_LIMITS,
@@ -20,8 +29,22 @@ export interface AgentShellInteractiveConfig {
   inactivity_enabled: boolean;
 }
 
+export interface AgentShellRosterRole {
+  name: string;
+  description: string;
+  agent_type: string;
+  model: string;
+  effort: string;
+}
+
+export interface AgentShellRosterConfig {
+  enabled: boolean;
+  roles: AgentShellRosterRole[];
+}
+
 export interface AgentShellConfig extends AgentShellLimits {
   interactive: AgentShellInteractiveConfig;
+  roster: AgentShellRosterConfig;
 }
 
 export const DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG:
@@ -31,6 +54,11 @@ export const DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG:
     inactivity_timeout: 60,
     inactivity_enabled: true,
   };
+
+export const DEFAULT_AGENT_SHELL_ROSTER_CONFIG: AgentShellRosterConfig = {
+  enabled: false,
+  roles: [],
+};
 
 function invalidConfiguration(path: string, reason: string): Error {
   return new Error(
@@ -64,6 +92,7 @@ export function loadAgentShellConfig(
     return {
       ...DEFAULT_AGENT_SHELL_LIMITS,
       interactive: { ...DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG },
+      roster: { ...DEFAULT_AGENT_SHELL_ROSTER_CONFIG, roles: [] },
     };
   }
 
@@ -96,8 +125,72 @@ export function loadAgentShellConfig(
   const overrides = parsed as Record<string, unknown>;
   const limits = { ...DEFAULT_AGENT_SHELL_LIMITS };
   const interactive = { ...DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG };
+  const roster: AgentShellRosterConfig = {
+    ...DEFAULT_AGENT_SHELL_ROSTER_CONFIG,
+    roles: [],
+  };
 
   for (const [setting, value] of Object.entries(overrides)) {
+    if (setting === "roster") {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw invalidConfiguration(configPath, "roster must be a JSON object");
+      }
+
+      for (const [rosterSetting, rosterValue] of Object.entries(value)) {
+        if (rosterSetting === "enabled") {
+          if (typeof rosterValue !== "boolean") {
+            throw invalidConfiguration(configPath, "roster.enabled must be a boolean");
+          }
+          roster.enabled = rosterValue;
+        } else if (rosterSetting === "roles") {
+          if (!Array.isArray(rosterValue)) {
+            throw invalidConfiguration(configPath, "roster.roles must be an array");
+          }
+          const names = new Set<string>();
+          roster.roles = rosterValue.map((role, index) => {
+            if (typeof role !== "object" || role === null || Array.isArray(role)) {
+              throw invalidConfiguration(
+                configPath,
+                `roster.roles[${index}] must be a JSON object`,
+              );
+            }
+            const fields = ["name", "description", "agent_type", "model", "effort"] as const;
+            for (const key of Object.keys(role)) {
+              if (!fields.includes(key as typeof fields[number])) {
+                throw invalidConfiguration(
+                  configPath,
+                  `unknown roster.roles[${index}] setting "${key}"`,
+                );
+              }
+            }
+            for (const field of fields) {
+              if (typeof role[field] !== "string" || role[field].trim().length === 0) {
+                throw invalidConfiguration(
+                  configPath,
+                  `roster.roles[${index}].${field} must be a non-empty string`,
+                );
+              }
+            }
+            const parsedRole = role as AgentShellRosterRole;
+            if (names.has(parsedRole.name)) {
+              throw invalidConfiguration(
+                configPath,
+                `duplicate roster role name "${parsedRole.name}"`,
+              );
+            }
+            names.add(parsedRole.name);
+            return parsedRole;
+          });
+        } else {
+          throw invalidConfiguration(
+            configPath,
+            `unknown roster setting "${rosterSetting}"`,
+          );
+        }
+      }
+      continue;
+    }
+
     if (setting === "interactive") {
       if (
         typeof value !== "object" ||
@@ -191,5 +284,38 @@ export function loadAgentShellConfig(
     }
   }
 
-  return { ...limits, interactive };
+  return { ...limits, interactive, roster };
+}
+
+export function setRosterEnabled(agentDirectory: string, enabled: boolean): void {
+  loadAgentShellConfig(agentDirectory);
+  const extensionDirectory = join(agentDirectory, "extensions");
+  const configPath = join(extensionDirectory, "agentshell.json");
+  const existing = existsSync(configPath)
+    ? JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>
+    : {};
+  const roster = existing.roster as Record<string, unknown> | undefined;
+  const updated = {
+    ...existing,
+    roster: { ...roster, enabled },
+  };
+  const targetPath = lstatSync(configPath, { throwIfNoEntry: false })?.isSymbolicLink()
+    ? realpathSync(configPath)
+    : configPath;
+  const temporaryPath = join(
+    dirname(targetPath),
+    `.agentshell-${process.pid}-${Date.now()}.tmp`,
+  );
+
+  mkdirSync(extensionDirectory, { recursive: true });
+  try {
+    writeFileSync(temporaryPath, `${JSON.stringify(updated, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    });
+    renameSync(temporaryPath, targetPath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
 }

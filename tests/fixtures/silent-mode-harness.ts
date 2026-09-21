@@ -203,8 +203,8 @@ export default async function silentModeHarness(): Promise<void> {
 
   assert.equal(
     commands.length,
-    4,
-    "the extension must register silent, jobs, inspect, and cancel commands",
+    5,
+    "the extension must register silent, roster, jobs, inspect, and cancel commands",
   );
   const command = commands.find(({ name }) => name === "agentshell-silent");
   const inspectCommand = commands.find(

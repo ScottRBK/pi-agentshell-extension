@@ -216,6 +216,41 @@ rendering. Each job captures the output mode when it is submitted. The setting b
 current Pi session and survives `/reload` and session resumption. New sessions start with normal
 output.
 
+### Preferred Subagent Roster
+
+Define preferred agent roles in `~/.pi/agent/extensions/agentshell.json`:
+
+```json
+{
+  "roster": {
+    "enabled": false,
+    "roles": [
+      {
+        "name": "reviewer",
+        "description": "Review code for defects",
+        "agent_type": "codex",
+        "model": "your-model-selector",
+        "effort": "high"
+      }
+    ]
+  }
+}
+```
+
+Run `/agentshell-roster` to switch the roster on or off for all Pi sessions. The command saves
+`roster.enabled` in this file; the default is off. When on, `subagent_roster` lists the roles and
+the `subagent` tool suggests checking it before delegation. The roster is advisory: the parent
+agent chooses a role and passes its `agent_type`, `model`, and `effort` through the existing
+`subagent` arguments. It can also choose other settings. Role names and descriptions are for the
+parent agent; they do not change how AgentShell launches a subagent.
+
+The switch takes effect immediately in the current Pi process. Run `/reload` in any other open Pi
+process to pick up the new setting.
+
+Every role needs all five fields shown above. Names must be unique. Use an AgentShell agent type
+and a model selector that your runtime supports; `subagent_list_models` can show current selectors.
+Run `/reload` after editing roles by hand.
+
 ### Resuming a Subagent
 
 Every successful completion message ends with the subagent's session ID:
