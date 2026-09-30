@@ -61,6 +61,7 @@ interface CapturedResult {
     sessionId?: string;
     outputTokens: number;
     warnings: string[];
+    errors?: string[];
     silent?: boolean;
   };
 }
@@ -73,7 +74,7 @@ interface CapturedTool {
   name: string;
   execute: (...args: any[]) => Promise<CapturedResult>;
   renderResult?: (
-    result: CapturedResult,
+    result: { content: CapturedResult["content"]; details?: CapturedResult["details"] },
     options: { expanded: boolean; isPartial: boolean },
     theme: CapturedTheme,
     context: { isError: boolean },
@@ -298,6 +299,28 @@ export default async function silentModeHarness(): Promise<void> {
 
       const silentJobId = assertRunningJob(silentResult);
       assert.deepEqual(updates, []);
+
+      // Arrange: inspect before the worker has reported activity or warnings.
+      const quietStatus = await statusTool.execute(
+        "quiet-mode-status",
+        { job_id: silentJobId },
+      );
+      assert.match(quietStatus.content[0]?.text ?? "", /No activity reported yet/);
+      assert.ok(statusTool.renderResult, "status output must have a custom renderer");
+
+      // Act / Assert: rendering hides normal status, even when expanded.
+      for (const expanded of [false, true]) {
+        assert.deepEqual(
+          statusTool.renderResult(
+            quietStatus,
+            { expanded, isPartial: false },
+            theme,
+            { isError: false },
+          ).render(100),
+          [],
+        );
+      }
+
       await waitFor(
         () => widgets.at(-1)?.content?.some((line) =>
           line === "   Last activity: shell command: `npm test`"
@@ -313,6 +336,47 @@ export default async function silentModeHarness(): Promise<void> {
         toolContext,
       );
       assert.match(silentStatus.content[0]?.text ?? "", /\[tool\] npm test/);
+      assert.match(silentStatus.content[0]?.text ?? "", /\[warning\]/);
+
+      // Act / Assert: only the actual worker warning reaches the terminal.
+      for (const expanded of [false, true]) {
+        assert.deepEqual(
+          statusTool.renderResult(
+            silentStatus,
+            { expanded, isPartial: false },
+            theme,
+            { isError: false },
+          ).render(100).map((line) => line.trimEnd()),
+          [`[warning] ${warning}`],
+        );
+      }
+
+      // A fresh inspection follows the current mode, not the job's launch mode.
+      await command.handler("", context);
+      const toggledStatus = await statusTool.execute(
+        "toggled-mode-status",
+        { job_id: silentJobId },
+      );
+      assert.equal(
+        statusTool.renderResult(
+          toggledStatus,
+          { expanded: false, isPartial: false },
+          theme,
+          { isError: false },
+        ).render(100).map((line) => line.trimEnd()).join("\n"),
+        toggledStatus.content[0]?.text,
+      );
+      // Already captured results retain their original presentation mode.
+      assert.deepEqual(
+        statusTool.renderResult(
+          quietStatus,
+          { expanded: true, isPartial: false },
+          theme,
+          { isError: false },
+        ).render(100),
+        [],
+      );
+      await command.handler("", context);
 
       const inspectNotifications: Array<{
         message: string;
@@ -334,6 +398,23 @@ export default async function silentModeHarness(): Promise<void> {
       await waitFor(
         () => sentMessages.length === 1,
         "the silent AgentShell completion",
+      );
+      // Delivery hides the activity text but must retain warnings in the terminal.
+      const deliveringStatus = await statusTool.execute(
+        "delivering-warning-status",
+        { job_id: silentJobId },
+      );
+      assert.equal(deliveringStatus.details.status, "delivering");
+      assert.match(deliveringStatus.content[0]?.text ?? "", /Final result is waiting for delivery/);
+      assert.doesNotMatch(deliveringStatus.content[0]?.text ?? "", /\[warning\]|\[tool\]/);
+      assert.deepEqual(
+        statusTool.renderResult(
+          deliveringStatus,
+          { expanded: false, isPartial: false },
+          theme,
+          { isError: false },
+        ).render(100).map((line) => line.trimEnd()),
+        [`[warning] ${warning}`],
       );
     });
   } finally {
@@ -410,8 +491,25 @@ export default async function silentModeHarness(): Promise<void> {
       { cwd: PYTHON_DIR },
     );
 
-    assertRunningJob(visibleResult);
+    const visibleJobId = assertRunningJob(visibleResult);
     assert.deepEqual(visibleUpdates, []);
+
+    // Arrange / Act: normal mode still displays the full status response.
+    const visibleStatus = await statusTool.execute(
+      "visible-mode-status",
+      { job_id: visibleJobId },
+    );
+    assert.ok(statusTool.renderResult);
+    for (const expanded of [false, true]) {
+      const rendered = statusTool.renderResult(
+        visibleStatus,
+        { expanded, isPartial: false },
+        theme,
+        { isError: false },
+      ).render(100).map((line) => line.trimEnd()).join("\n");
+      assert.equal(rendered, visibleStatus.content[0]?.text);
+    }
+
     await waitFor(
       () => sentMessages.length === 2,
       "the visible AgentShell completion",
@@ -420,6 +518,204 @@ export default async function silentModeHarness(): Promise<void> {
 
   assert.equal(sentMessages[1]?.message.details?.silent, undefined);
   assert.match(sentMessages[1]?.message.content ?? "", /visible response/);
+
+  // Preserve Pi's normal collapsed preview; expanding reveals the full status text.
+  assert.ok(statusTool.renderResult);
+  const longStatus = {
+    content: [{ type: "text", text: [
+      "Status line 1", "Status line 2", "Status line 3", "Status line 4",
+      "Status line 5", "Status line 6", "Status line 7", "Status line 8",
+      "Status line 9", "Status line 10", "Status line 11", "Status line 12",
+    ].join("\n") }],
+    details: { status: "running", outputTokens: 0, warnings: [], silent: false },
+  };
+  const collapsedStatus = statusTool.renderResult(
+    longStatus,
+    { expanded: false, isPartial: false },
+    theme,
+    { isError: false },
+  ).render(100).map((line) => line.trimEnd()).join("\n");
+  assert.match(collapsedStatus, /Status line 10/);
+  assert.doesNotMatch(collapsedStatus, /Status line 11/);
+  assert.match(collapsedStatus, /2 more lines/);
+  const expandedStatus = statusTool.renderResult(
+    longStatus,
+    { expanded: true, isPartial: false },
+    theme,
+    { isError: false },
+  ).render(100).map((line) => line.trimEnd()).join("\n");
+  assert.equal(expandedStatus, longStatus.content[0].text);
+
+  // Arrange: a real worker reports an error while the status tool is silent.
+  await command.handler("", context);
+  const previousError = process.env.FAKE_CODEX_ERROR;
+  const previousErrorDelay = process.env.FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS;
+  process.env.FAKE_CODEX_ERROR = "1";
+  process.env.FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS = "1";
+  try {
+    await withFakeCodex("error smoke reply", async () => {
+      const failedLaunch = await tool.execute(
+        "error-status-call",
+        {
+          agent_type: "codex",
+          task_name: "Error status smoke test",
+          prompt: "Return an error",
+        },
+        undefined,
+        undefined,
+        toolContext,
+      );
+      const failedJobId = assertRunningJob(failedLaunch);
+      await waitFor(
+        () => widgets.at(-1)?.content?.some((line) =>
+          line === "   Last activity: error reported"
+        ) === true,
+        "the worker error activity",
+      );
+
+      // Act
+      const errorStatus = await statusTool.execute(
+        "error-mode-status",
+        { job_id: failedJobId },
+      );
+      assert.ok(statusTool.renderResult);
+
+      // Assert: the parent keeps full activity, the terminal sees only the error.
+      assert.match(errorStatus.content[0]?.text ?? "", /\[text\] error smoke reply/);
+      assert.match(errorStatus.content[0]?.text ?? "", /\[error\] fake agent failed/);
+      for (const expanded of [false, true]) {
+        assert.deepEqual(
+          statusTool.renderResult(
+            errorStatus,
+            { expanded, isPartial: false },
+            theme,
+            { isError: false },
+          ).render(100).map((line) => line.trimEnd()),
+          ["[error] fake agent failed"],
+        );
+      }
+      await waitFor(() => sentMessages.length === 3, "the worker error completion");
+    });
+  } finally {
+    if (previousError === undefined) {
+      delete process.env.FAKE_CODEX_ERROR;
+    } else {
+      process.env.FAKE_CODEX_ERROR = previousError;
+    }
+    if (previousErrorDelay === undefined) {
+      delete process.env.FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS;
+    } else {
+      process.env.FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS = previousErrorDelay;
+    }
+  }
+
+  // A noisy worker must not expand the bounded inspection window in metadata or on screen.
+  const previousErrorCount = process.env.FAKE_CODEX_ERROR_COUNT;
+  const previousErrorSuffix = process.env.FAKE_CODEX_ERROR_SUFFIX;
+  const previousNoisyDelay = process.env.FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS;
+  process.env.FAKE_CODEX_ERROR_COUNT = "25";
+  process.env.FAKE_CODEX_ERROR_SUFFIX = "x".repeat(500);
+  process.env.FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS = "1";
+  try {
+    await withFakeCodex("noisy worker reply", async () => {
+      const launch = await tool.execute(
+        "noisy-status-call",
+        {
+          agent_type: "codex",
+          task_name: "Noisy status smoke test",
+          prompt: "Return many errors",
+          allowed_tools: ["Read"],
+        },
+        undefined,
+        undefined,
+        toolContext,
+      );
+      const jobId = assertRunningJob(launch);
+      let status: CapturedResult;
+      // Wait for the last observable error, not a fixed sleep or a hidden widget row.
+      const deadline = Date.now() + 5_000;
+      do {
+        status = await statusTool.execute("noisy-status", { job_id: jobId });
+        if (status.content[0]?.text.includes("[error] fake agent failed 25 ")) break;
+        assert.ok(Date.now() < deadline, "timed out waiting for the final noisy error");
+        await delay(10);
+      } while (true);
+
+      // Assert: only errors 6–25 remain in the 20-entry inspection window.
+      assert.equal(status.details.errors?.length, 20);
+      assert.deepEqual(status.details.warnings, []);
+      assert.match(status.details.errors?.[0] ?? "", /^\[error\] fake agent failed 6 /);
+      assert.match(status.details.errors?.at(-1) ?? "", /^\[error\] fake agent failed 25 /);
+      assert.ok(status.details.errors?.every((entry) => entry.length <= 408));
+      assert.ok(status.details.errors?.every((entry) => entry.endsWith("…")));
+      assert.ok(statusTool.renderResult);
+      const rendered = statusTool.renderResult(
+        status,
+        { expanded: true, isPartial: false },
+        theme,
+        { isError: false },
+      ).render(100).map((line) => line.trimEnd()).join("\n");
+      assert.doesNotMatch(rendered, /\[warning\]/);
+      assert.doesNotMatch(rendered, /fake agent failed 5 /);
+      await waitFor(() => sentMessages.length === 4, "the noisy worker completion");
+    });
+  } finally {
+    for (const [name, value] of [
+      ["FAKE_CODEX_ERROR_COUNT", previousErrorCount],
+      ["FAKE_CODEX_ERROR_SUFFIX", previousErrorSuffix],
+      ["FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS", previousNoisyDelay],
+    ]) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+
+  // Lookup failures become Pi error results without details; they must not disappear.
+  await assert.rejects(
+    statusTool.execute("missing-status", { job_id: "missing-job" }),
+    /No active subagent job found with ID missing-job/,
+  );
+  assert.ok(statusTool.renderResult);
+  const lookupFailure = "No active subagent job found with ID missing-job.";
+  assert.deepEqual(
+    statusTool.renderResult(
+      { content: [{ type: "text", text: lookupFailure }] },
+      { expanded: false, isPartial: false },
+      theme,
+      { isError: true },
+    ).render(100).map((line) => line.trimEnd()),
+    [lookupFailure],
+  );
+
+  // Status and lookup errors must not send ANSI/OSC, CR or binary control codes to the terminal.
+  for (const isError of [false, true]) {
+    const unsafeText = "\u001b[31mTask\u001b[0m: red\r\n"
+      + "\u001b]8;;https://example.test\u0007Link\u001b]8;;\u0007\nControl\u0000 text";
+    assert.deepEqual(
+      statusTool.renderResult(
+        { content: [{ type: "text", text: unsafeText }] },
+        { expanded: true, isPartial: false },
+        theme,
+        { isError },
+      ).render(100).map((line) => line.trimEnd()),
+      ["Task: red", "Link", "Control text"],
+    );
+  }
+
+  // A failed status remains visible even if Pi doesn't mark the inspection itself as an error.
+  const failedStatusText = "Subagent job failed.\nWorker exited unexpectedly.";
+  assert.deepEqual(
+    statusTool.renderResult(
+      {
+        content: [{ type: "text", text: failedStatusText }],
+        details: { status: "failed", silent: true, warnings: [], outputTokens: 0 },
+      },
+      { expanded: true, isPartial: false },
+      theme,
+      { isError: false },
+    ).render(100).map((line) => line.trimEnd()).join("\n"),
+    failedStatusText,
+  );
 
   const restoredCommands: CapturedCommand[] = [];
   const restoredEntries: CapturedEntry[] = [];

@@ -1,6 +1,9 @@
+import { stripVTControlCharacters } from "node:util";
+
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
   getAgentDir,
+  keyText,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -654,6 +657,7 @@ function registerSubagentStatusTool(
   pi: ExtensionAPI,
   jobs: JobRegistry,
   deliveries: ReadonlyMap<string, TerminalJobStatus>,
+  isSilentMode: () => boolean,
 ): void {
   pi.registerTool({
     name: "subagent_status",
@@ -678,6 +682,7 @@ function registerSubagentStatusTool(
       }
 
       const isDelivering = deliveries.has(job.id);
+      const activity = job.activity?.slice(-MAX_INSPECTION_ACTIVITY_ENTRIES) ?? [];
 
       return {
         content: [{
@@ -688,9 +693,35 @@ function registerSubagentStatusTool(
           status: isDelivering ? "delivering" as const : job.status,
           jobId: job.id,
           outputTokens: 0,
-          warnings: [] as string[],
+          warnings: activity.filter((entry) => entry.type === "warning").map(formatActivityEntry),
+          errors: activity.filter((entry) => entry.type === "error").map(formatActivityEntry),
+          silent: isSilentMode(),
         },
       };
+    },
+
+    renderResult(result, options, theme, context) {
+      if (result.details?.silent && !context.isError && result.details.status !== "failed") {
+        const warnings = result.details.warnings.map((text) => theme.fg("warning", text));
+        const errors = (result.details.errors ?? []).map((text) => theme.fg("error", text));
+        return new Text([...warnings, ...errors].join("\n"), 0, 0);
+      }
+
+      const output = result.content
+        .filter((part) => part.type === "text")
+        .map((part) => stripVTControlCharacters(part.text)
+          .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ""))
+        .join("\n");
+      const lines = output.split("\n");
+      const displayLines = options.expanded ? lines : lines.slice(0, 10);
+      let text = theme.fg(context.isError ? "error" : "toolOutput", displayLines.join("\n"));
+      const remaining = lines.length - displayLines.length;
+      if (remaining > 0) {
+        text += theme.fg("muted", `\n... (${remaining} more lines, `)
+          + theme.fg("dim", keyText("app.tools.expand"))
+          + theme.fg("muted", " to expand)");
+      }
+      return new Text(text, 0, 0);
     },
   });
 }
@@ -713,7 +744,7 @@ async function registerSubagentTool(
 
   registerJobMessageRenderer(pi);
   registerJobDeliveryHandler(pi, jobs, deliveries);
-  registerSubagentStatusTool(pi, jobs, deliveries);
+  registerSubagentStatusTool(pi, jobs, deliveries, isSilentMode);
 
   const registerInvocation = (enabled: boolean): void => pi.registerTool({
     name: "subagent",

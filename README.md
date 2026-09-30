@@ -210,10 +210,16 @@ to the current Pi session. Session shutdown cancels remaining work.
 Run `/agentshell-silent` to hide successful subagent responses in Pi. Run it again to restore normal
 output. Silent calls display `✓ Completed`, while warnings and errors remain visible.
 
-The parent agent still receives the complete response. Silent mode does not hide the live activity
-widget, `/agentshell-inspect`, or `subagent_status`; it only changes successful final-message
-rendering. Each job captures the output mode when it is submitted. The command saves your choice
-for the current Pi session, including across `/reload` and session resumption.
+The parent agent still receives complete responses and status details. Silent mode hides ordinary
+`subagent_status` result text in the terminal, even when expanded; warnings and errors remain
+visible. Status diagnostics use the same recent 20-entry window and per-entry length limit as the
+parent's activity text. Tool-call headings, the live activity widget, and `/agentshell-inspect` are
+unchanged. The parent agent can still quote a subagent's response in its own messages.
+
+In normal mode, status results show a 10-line preview; expand the tool result to see the rest.
+
+Each job captures the output mode when submitted; each status inspection captures it when called.
+The command saves your choice for the current Pi session, including across `/reload` and resumption.
 
 To start new sessions in silent mode, set a global default in
 `~/.pi/agent/extensions/agentshell.json` (alongside any existing settings):

@@ -74,8 +74,21 @@ if [ "$FAKE_CODEX_MULTIPLE_ERRORS" = "1" ]; then
    echo '{"type":"turn.failed","error":{"message":"fake agent failed"}}'
    printf 'Reading additional input from stdin...\n' >&2
    exit 1
+elif [ -n "$FAKE_CODEX_ERROR_COUNT" ]; then
+   index=1
+   while [ "$index" -le "$FAKE_CODEX_ERROR_COUNT" ]; do
+      printf '{"type":"turn.failed","error":{"message":"fake agent failed %s %s"}}\n' \
+         "$index" "$FAKE_CODEX_ERROR_SUFFIX"
+      index=$((index + 1))
+   done
+   if [ -n "$FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS" ]; then
+      /bin/sleep "$FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS"
+   fi
 elif [ "$FAKE_CODEX_ERROR" = "1" ]; then
    echo '{"type":"turn.failed","error":{"message":"fake agent failed"}}'
+   if [ -n "$FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS" ]; then
+      /bin/sleep "$FAKE_CODEX_AFTER_ERROR_DELAY_SECONDS"
+   fi
 elif [ "$FAKE_CODEX_NO_RESULT" != "1" ]; then
    echo '{"type":"turn.completed","usage":{"output_tokens":7}}'
 fi
