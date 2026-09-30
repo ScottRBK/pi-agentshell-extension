@@ -1032,7 +1032,7 @@ export default async function subagentsExtension(
   const pendingMessages: PendingTerminalMessage[] = [];
   let parentAgentActive = false;
   let shuttingDown = false;
-  let silentMode = false;
+  let silentMode = config.silent;
   let refreshSubagentTool: ((enabled: boolean) => void) | undefined;
 
   if (config.roster.enabled) {
@@ -1066,7 +1066,7 @@ export default async function subagentsExtension(
     pendingMessages.length = 0;
     deliveries.clear();
     shuttingDown = false;
-    silentMode = false;
+    silentMode = config.silent;
 
     for (const entry of ctx.sessionManager.getBranch()) {
       if (

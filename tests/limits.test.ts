@@ -45,6 +45,7 @@ test("uses default limits when no config file exists", () => {
     );
     assert.deepEqual(loadAgentShellConfig(agentDirectory), {
       ...DEFAULT_AGENT_SHELL_LIMITS,
+      silent: false,
       interactive: DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG,
       roster: DEFAULT_AGENT_SHELL_ROSTER_CONFIG,
     });
@@ -94,6 +95,7 @@ test("loads interactive defaults and nested overrides with existing limits", () 
     assert.deepEqual(config, {
       ...DEFAULT_AGENT_SHELL_LIMITS,
       maxOutputBytes: 128 * 1024,
+      silent: false,
       interactive: {
         enabled: true,
         stay_open: true,
@@ -108,6 +110,40 @@ test("loads interactive defaults and nested overrides with existing limits", () 
     });
   } finally {
     rmSync(agentDirectory, { recursive: true, force: true });
+  }
+});
+
+test("loads either global silent default alongside existing settings", () => {
+  for (const silent of [false, true]) {
+    // Arrange
+    const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-silent-config-"));
+    try {
+      writeConfig(agentDirectory, { silent, maxOutputBytes: 128 * 1024 });
+
+      // Act
+      const config = loadAgentShellConfig(agentDirectory);
+
+      // Assert
+      assert.equal(config.silent, silent);
+      assert.equal(config.maxOutputBytes, 128 * 1024);
+    } finally {
+      rmSync(agentDirectory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("rejects non-boolean global silent settings", () => {
+  for (const silent of ["true", 1, null, {}, []]) {
+    // Arrange
+    const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-silent-config-"));
+    try {
+      writeConfig(agentDirectory, { silent });
+
+      // Act / Assert
+      assert.throws(() => loadAgentShellConfig(agentDirectory), /silent must be a boolean/);
+    } finally {
+      rmSync(agentDirectory, { recursive: true, force: true });
+    }
   }
 });
 

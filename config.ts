@@ -43,6 +43,7 @@ export interface AgentShellRosterConfig {
 }
 
 export interface AgentShellConfig extends AgentShellLimits {
+  silent: boolean;
   interactive: AgentShellInteractiveConfig;
   roster: AgentShellRosterConfig;
 }
@@ -91,6 +92,7 @@ export function loadAgentShellConfig(
   if (!existsSync(configPath)) {
     return {
       ...DEFAULT_AGENT_SHELL_LIMITS,
+      silent: false,
       interactive: { ...DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG },
       roster: { ...DEFAULT_AGENT_SHELL_ROSTER_CONFIG, roles: [] },
     };
@@ -124,6 +126,7 @@ export function loadAgentShellConfig(
 
   const overrides = parsed as Record<string, unknown>;
   const limits = { ...DEFAULT_AGENT_SHELL_LIMITS };
+  let silent = false;
   const interactive = { ...DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG };
   const roster: AgentShellRosterConfig = {
     ...DEFAULT_AGENT_SHELL_ROSTER_CONFIG,
@@ -131,6 +134,14 @@ export function loadAgentShellConfig(
   };
 
   for (const [setting, value] of Object.entries(overrides)) {
+    if (setting === "silent") {
+      if (typeof value !== "boolean") {
+        throw invalidConfiguration(configPath, "silent must be a boolean");
+      }
+      silent = value;
+      continue;
+    }
+
     if (setting === "roster") {
       if (typeof value !== "object" || value === null || Array.isArray(value)) {
         throw invalidConfiguration(configPath, "roster must be a JSON object");
@@ -284,7 +295,7 @@ export function loadAgentShellConfig(
     }
   }
 
-  return { ...limits, interactive, roster };
+  return { ...limits, silent, interactive, roster };
 }
 
 export function setRosterEnabled(agentDirectory: string, enabled: boolean): void {

@@ -212,9 +212,21 @@ output. Silent calls display `✓ Completed`, while warnings and errors remain v
 
 The parent agent still receives the complete response. Silent mode does not hide the live activity
 widget, `/agentshell-inspect`, or `subagent_status`; it only changes successful final-message
-rendering. Each job captures the output mode when it is submitted. The setting belongs to the
-current Pi session and survives `/reload` and session resumption. New sessions start with normal
-output.
+rendering. Each job captures the output mode when it is submitted. The command saves your choice
+for the current Pi session, including across `/reload` and session resumption.
+
+To start new sessions in silent mode, set a global default in
+`~/.pi/agent/extensions/agentshell.json` (alongside any existing settings):
+
+```json
+{
+  "silent": true
+}
+```
+
+Run `/reload` after changing the file. Saved session choices override the global default, so an
+existing session may still need `/agentshell-silent` once. If `silent` is omitted or `false`, new
+sessions start with normal output.
 
 ### Preferred Subagent Roster
 

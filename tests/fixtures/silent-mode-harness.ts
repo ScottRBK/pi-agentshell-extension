@@ -109,7 +109,7 @@ interface SessionContext {
 }
 
 type SessionStartHandler = (
-  event: { type: "session_start"; reason: "resume" },
+  event: { type: "session_start"; reason: "startup" | "reload" | "new" | "resume" },
   context: SessionContext,
 ) => Promise<void> | void;
 
@@ -169,6 +169,8 @@ function assertRunningJob(result: CapturedResult): string {
 }
 
 export default async function silentModeHarness(): Promise<void> {
+  const globalSilent = process.env.SILENT_MODE_GLOBAL_DEFAULT === "true";
+  let initialSessionStart: SessionStartHandler | undefined;
   const commands: CapturedCommand[] = [];
   const entries: CapturedEntry[] = [];
   const notifications: Array<{ message: string; type: string }> = [];
@@ -190,7 +192,11 @@ export default async function silentModeHarness(): Promise<void> {
     registerMessageRenderer(customType: string, renderer: MessageRenderer) {
       messageRenderers.push({ customType, renderer });
     },
-    on() {},
+    on(event: string, handler: SessionStartHandler) {
+      if (event === "session_start") {
+        initialSessionStart = handler;
+      }
+    },
     appendEntry(customType: string, data: unknown) {
       entries.push({ customType, data });
     },
@@ -200,6 +206,11 @@ export default async function silentModeHarness(): Promise<void> {
   } as unknown as ExtensionAPI;
 
   await subagentsExtension(fakePi);
+  assert.ok(initialSessionStart);
+  await initialSessionStart(
+    { type: "session_start", reason: "startup" },
+    { sessionManager: { getBranch: () => [] } },
+  );
 
   assert.equal(
     commands.length,
@@ -223,15 +234,17 @@ export default async function silentModeHarness(): Promise<void> {
     },
   };
 
-  await command.handler("", context);
+  if (!globalSilent) {
+    await command.handler("", context);
+  }
 
-  assert.deepEqual(entries, [
+  assert.deepEqual(entries, globalSilent ? [] : [
     {
       customType: "agentshell-output-mode",
       data: { silent: true },
     },
   ]);
-  assert.deepEqual(notifications, [
+  assert.deepEqual(notifications, globalSilent ? [] : [
     {
       message: "Subagent responses are now hidden.",
       type: "info",
@@ -374,11 +387,11 @@ export default async function silentModeHarness(): Promise<void> {
 
   await command.handler("", context);
 
-  assert.deepEqual(entries[1], {
+  assert.deepEqual(entries.at(-1), {
     customType: "agentshell-output-mode",
     data: { silent: false },
   });
-  assert.deepEqual(notifications[1], {
+  assert.deepEqual(notifications.at(-1), {
     message: "Subagent responses are now visible.",
     type: "info",
   });
@@ -477,6 +490,67 @@ export default async function silentModeHarness(): Promise<void> {
       type: "info",
     },
   ]);
+
+  // Saved session choices must override either global default, including explicit false.
+  for (const reason of ["reload", "resume"] as const) {
+    for (const savedSilent of [false, true]) {
+      // Arrange
+      restoredEntries.length = 0;
+      restoredNotifications.length = 0;
+
+      // Act
+      await sessionStart(
+        { type: "session_start", reason },
+        {
+          sessionManager: {
+            getBranch: () => [
+              {
+                type: "custom",
+                customType: "agentshell-output-mode",
+                data: { silent: !savedSilent },
+              },
+              {
+                type: "custom",
+                customType: "agentshell-output-mode",
+                data: { silent: savedSilent },
+              },
+            ],
+          },
+        },
+      );
+      await restoredCommand.handler("", {
+        ui: {
+          notify(message, type) {
+            restoredNotifications.push({ message, type });
+          },
+        },
+      });
+
+      // Assert: toggling flips the last saved choice, not the global default.
+      assert.deepEqual(restoredEntries, [{
+        customType: "agentshell-output-mode",
+        data: { silent: !savedSilent },
+      }]);
+      assert.equal(
+        restoredNotifications[0]?.message,
+        savedSilent
+          ? "Subagent responses are now visible."
+          : "Subagent responses are now hidden.",
+      );
+    }
+  }
+
+  // A new session resets the previous session's choice to the global default.
+  restoredEntries.length = 0;
+  await sessionStart(
+    { type: "session_start", reason: "new" },
+    { sessionManager: { getBranch: () => [] } },
+  );
+  await restoredCommand.handler("", { ui: { notify() {} } });
+  assert.deepEqual(restoredEntries, [{
+    customType: "agentshell-output-mode",
+    data: { silent: !globalSilent },
+  }]);
 
   process.stderr.write("SILENT_MODE_COMMAND_OK\n");
 }
