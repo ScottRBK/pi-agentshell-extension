@@ -9,9 +9,9 @@ harnesses, including Pi, through [AgentShell](https://github.com/ScottRBK/agent-
 
 ![Architecture diagram](docs/assets/architecture.png)
 
-Pi submits each delegation to a session-scoped job registry. The existing TypeScript runner and
-Python worker execute it in the background through AgentShell. Completion is then delivered back to
-Pi as a conversation message.
+The TypeScript runner and Python worker execute delegated tasks through AgentShell. In TUI and RPC
+sessions, a session-scoped job registry tracks background work and delivers completion as a
+conversation message. JSON and print sessions wait inside the tool call and return its final result.
 
 ## Requirements
 
@@ -158,8 +158,13 @@ An empty array is a valid result. If an existing runtime predates model discover
 
 ### Asynchronous Jobs
 
-The `subagent` tool returns immediately with a session-scoped Job ID. The parent agent and user can
-continue their conversation while the delegated agent runs in the background.
+In TUI and RPC sessions, `subagent` returns immediately with a session-scoped Job ID. The parent
+agent and user can continue their conversation while the delegated agent runs in the background.
+
+In JSON and print sessions, `subagent` waits for the delegated task to finish and returns its result
+or error directly, including the real session ID when available. It creates no background Job ID
+and sends no follow-up message. Cancelling the tool call cancels its worker. This lets a headless Pi
+child finish its own delegated tasks before its session exits.
 
 When the job finishes, its response is delivered to the parent as a follow-up message. If the parent
 is idle, this starts a turn immediately. If the parent is already working, Pi queues the completion
@@ -295,6 +300,39 @@ ID, or a newly generated UUID.
 
 The subagent harness owns the stored session; this extension only forwards the ID.
 
+### Nested Delegation
+
+By default, your root Pi session can delegate tasks, but its children cannot use this extension.
+To allow children to delegate too, set the literal `MAX_SUB_AGENT_DEPTH` key in
+`~/.pi/agent/extensions/agentshell.json` (or under your custom Pi agent directory):
+
+```json
+{
+  "MAX_SUB_AGENT_DEPTH": 1
+}
+```
+
+| Value | Sessions that can use the extension |
+| --- | --- |
+| `0` (default) | Root only; its direct children have the extension disabled. |
+| `1` | Root and its children; grandchildren have the extension disabled. |
+| `2` | Root, children, and grandchildren; the next generation has it disabled. |
+
+Values must be nonnegative safe integers, up to JavaScript's `9007199254740991` limit. At the root,
+negative numbers, fractions, strings, `null`, booleans, and other invalid explicit values produce a
+configuration error. There is no environment-variable override for this setting.
+
+The root captures the limit when the extension loads. Every task launched through this extension
+advances the depth, regardless of the chosen harness or whether the task uses a tmux pane. Children
+inherit the root's limit; their local configuration cannot raise, lower, or reset it. Editing the
+file does not change an existing root's snapshot. Run `/reload` in the root to use a new value for
+future launches; existing descendants retain their inherited limit.
+
+At the depth boundary, the whole extension is disabled before other startup work. Legacy children
+without depth metadata, and children with incomplete or malformed metadata, also have it disabled.
+The limit controls delegation through this extension only. It does not restrict native agent tools
+or manual CLI launches, and those launches do not advance the extension's depth counter.
+
 ## Output Limits
 
 The extension stops a subagent if any of these limits are exceeded:
@@ -327,7 +365,7 @@ Overrides may be partial. Values are positive whole numbers in bytes. `maxOutput
 
 - Child processes run with the user's permissions
 - Approval bypass is disabled by default
-- Child Pi sessions do not receive the subagent tool, preventing recursive delegation
+- Nested extension delegation is disabled by default; `MAX_SUB_AGENT_DEPTH` can enable it
 - Active jobs are cancelled when their owning Pi session shuts down
 - Stopping a parent turn does not stop background jobs; use `/agentshell-cancel` when needed
 
@@ -343,7 +381,7 @@ Install Pi, uv, and tmux, then run:
 
 ```bash
 uv sync --project python --locked
-env -u PI_AGENT_SHELL_CHILD npm test
+env -u PI_AGENT_SHELL_CHILD -u PI_AGENT_SHELL_DEPTH -u PI_AGENT_SHELL_MAX_DEPTH npm test
 npm run test:python
 ```
 

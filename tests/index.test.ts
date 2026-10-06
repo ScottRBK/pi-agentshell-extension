@@ -27,6 +27,8 @@ test("toggles the global roster tool and invocation hint", { timeout: 15_000 }, 
   const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-roster-agent-"));
   const env = { ...process.env, PI_CODING_AGENT_DIR: agentDirectory };
   delete env.PI_AGENT_SHELL_CHILD;
+  delete env.PI_AGENT_SHELL_DEPTH;
+  delete env.PI_AGENT_SHELL_MAX_DEPTH;
 
   try {
     mkdirSync(join(agentDirectory, "extensions"));
@@ -149,6 +151,8 @@ function runInteractiveIndexHarness(oldRuntime = false): ReturnType<typeof spawn
       TMUX_PANE: oldRuntime ? "" : "%1",
     };
     delete env.PI_AGENT_SHELL_CHILD;
+    delete env.PI_AGENT_SHELL_DEPTH;
+    delete env.PI_AGENT_SHELL_MAX_DEPTH;
 
     return spawnSync(
       "pi",
@@ -180,6 +184,8 @@ test("submits subagent jobs and delivers their completions", {
 }, () => {
   const env = { ...process.env };
   delete env.PI_AGENT_SHELL_CHILD;
+  delete env.PI_AGENT_SHELL_DEPTH;
+  delete env.PI_AGENT_SHELL_MAX_DEPTH;
 
   const completed = spawnSync(
     "pi",
@@ -222,6 +228,8 @@ test("defers active-agent completions until settlement", {
     INDEX_DELIVERY_RACE_TEST: "1",
   };
   delete env.PI_AGENT_SHELL_CHILD;
+  delete env.PI_AGENT_SHELL_DEPTH;
+  delete env.PI_AGENT_SHELL_MAX_DEPTH;
 
   const completed = spawnSync(
     "pi",
@@ -260,6 +268,8 @@ test("keeps the parent active after a non-idle settlement", {
     INDEX_DELIVERY_IDLE_CHECK_TEST: "1",
   };
   delete env.PI_AGENT_SHELL_CHILD;
+  delete env.PI_AGENT_SHELL_DEPTH;
+  delete env.PI_AGENT_SHELL_MAX_DEPTH;
 
   const completed = spawnSync(
     "pi",
@@ -303,6 +313,8 @@ test("applies user-configured AgentShell limits", {
     PI_CODING_AGENT_DIR: agentDirectory,
   };
   delete env.PI_AGENT_SHELL_CHILD;
+  delete env.PI_AGENT_SHELL_DEPTH;
+  delete env.PI_AGENT_SHELL_MAX_DEPTH;
 
   try {
     mkdirSync(extensionDirectory);

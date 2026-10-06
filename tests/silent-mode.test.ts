@@ -33,6 +33,8 @@ for (const silent of [false, true]) {
       SILENT_MODE_GLOBAL_DEFAULT: String(silent),
     };
     delete env.PI_AGENT_SHELL_CHILD;
+    delete env.PI_AGENT_SHELL_DEPTH;
+    delete env.PI_AGENT_SHELL_MAX_DEPTH;
 
     try {
       // Act: exercise the extension in a real Pi process.

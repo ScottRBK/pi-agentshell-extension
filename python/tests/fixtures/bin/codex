@@ -43,6 +43,9 @@ if [ -n "$FAKE_CODEX_DELAY_SECONDS" ]; then
 fi
 
 response=${FAKE_CODEX_RESPONSE:-test response}
+if [ "$FAKE_AGENT_DEPTH_RESPONSE" = "1" ]; then
+   response="depth=$PI_AGENT_SHELL_DEPTH max=$PI_AGENT_SHELL_MAX_DEPTH child=$PI_AGENT_SHELL_CHILD"
+fi
 
 echo '{"type":"thread.started","thread_id":"test-session"}'
 

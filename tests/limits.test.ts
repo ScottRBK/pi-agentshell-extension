@@ -45,6 +45,7 @@ test("uses default limits when no config file exists", () => {
     );
     assert.deepEqual(loadAgentShellConfig(agentDirectory), {
       ...DEFAULT_AGENT_SHELL_LIMITS,
+      MAX_SUB_AGENT_DEPTH: 0,
       silent: false,
       interactive: DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG,
       roster: DEFAULT_AGENT_SHELL_ROSTER_CONFIG,
@@ -94,6 +95,7 @@ test("loads interactive defaults and nested overrides with existing limits", () 
     // Assert
     assert.deepEqual(config, {
       ...DEFAULT_AGENT_SHELL_LIMITS,
+      MAX_SUB_AGENT_DEPTH: 0,
       maxOutputBytes: 128 * 1024,
       silent: false,
       interactive: {
@@ -110,6 +112,39 @@ test("loads interactive defaults and nested overrides with existing limits", () 
     });
   } finally {
     rmSync(agentDirectory, { recursive: true, force: true });
+  }
+});
+
+test("loads only nonnegative safe integer MAX_SUB_AGENT_DEPTH values", () => {
+  for (const depth of [0, 1, 2, Number.MAX_SAFE_INTEGER]) {
+    // Arrange
+    const directory = mkdtempSync(join(tmpdir(), "pi-agentshell-depth-"));
+    try {
+      writeConfig(directory, { MAX_SUB_AGENT_DEPTH: depth });
+
+      // Act / Assert
+      assert.equal(loadAgentShellConfig(directory).MAX_SUB_AGENT_DEPTH, depth);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("rejects invalid explicit MAX_SUB_AGENT_DEPTH values with the config path", () => {
+  for (const depth of [-1, 0.5, "1", null, true, false, [], {}, Number.MAX_SAFE_INTEGER + 1]) {
+    // Arrange
+    const directory = mkdtempSync(join(tmpdir(), "pi-agentshell-depth-"));
+    try {
+      const path = writeConfig(directory, { MAX_SUB_AGENT_DEPTH: depth });
+
+      // Act / Assert
+      assert.throws(() => loadAgentShellConfig(directory), {
+        message: `Invalid AgentShell configuration at ${path}: ` +
+          "MAX_SUB_AGENT_DEPTH must be a nonnegative safe integer",
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 

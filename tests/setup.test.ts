@@ -79,6 +79,8 @@ for (const [name, scenario] of scenarios) {
         SETUP_SCENARIO: scenario,
       };
       delete env.PI_AGENT_SHELL_CHILD;
+      delete env.PI_AGENT_SHELL_DEPTH;
+      delete env.PI_AGENT_SHELL_MAX_DEPTH;
 
       const completed = spawnSync(
         "pi",

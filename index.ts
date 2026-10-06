@@ -28,10 +28,12 @@ import {
   closeAgentShellWorkers,
   getAgentShellModels,
   getSupportedAgentTypes,
+  inheritedAgentShellDelegation,
   isAgentShellRuntimeInstalled,
   runAgentShell,
   supportsAgentShellInteractive,
   supportsAgentShellModelDiscovery,
+  type AgentShellDelegation,
   type RunResult,
 } from "./runner.ts";
 
@@ -739,6 +741,7 @@ async function registerSubagentTool(
   modelDiscoverySupported: boolean,
   interactiveSupported: boolean,
   rosterEnabled: boolean,
+  delegation: AgentShellDelegation,
 ): Promise<(enabled: boolean) => void> {
   const agentTypes = await getSupportedAgentTypes(limits);
 
@@ -752,11 +755,14 @@ async function registerSubagentTool(
     description: [
       "Delegate a task to an AI coding agent in a separate context.",
       "Long-running subagent calls may return `Subagent job <job-id> started`.",
+      "TUI and RPC sessions run jobs in the background. In JSON/print mode, " +
+        "the call waits and returns the result directly, without a Job ID or follow-up.",
       "Do not repeatedly poll the process or run sleep commands.",
       "Use subagent_status only when current progress is useful.",
       "A Job ID is not a session ID.",
-      "The extension automatically delivers the result using a follow-up turn.",
-      "Continue other work or remain idle until notified.",
+      "For background jobs, the extension automatically delivers the result " +
+        "using a follow-up turn.",
+      "While a background job runs, continue other work or remain idle until notified.",
       "The real resumable session ID arrives with the completion result.",
       RESUME_SESSION_GUIDANCE,
       ...(enabled ? [
@@ -878,7 +884,7 @@ async function registerSubagentTool(
       return new Text(theme.fg(color, output), 0, 0);
     },
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, toolSignal, _onUpdate, ctx) {
       const silent = isSilentMode();
       const interactive = resolveInteractiveLaunchSettings(
         params,
@@ -893,24 +899,31 @@ async function registerSubagentTool(
         ].join("\n"));
       }
 
+      const request = {
+        agent_type: params.agent_type,
+        cwd: params.cwd ?? ctx.cwd,
+        prompt: params.prompt,
+        model: params.model,
+        effort: params.effort,
+        session_id: params.resume_session_id ?? undefined,
+        auto_approve: params.auto_approve,
+        allowed_tools: params.allowed_tools,
+        disallowed_tools: params.disallowed_tools,
+        ...interactive,
+      };
+
+      if (ctx.mode === "json" || ctx.mode === "print") {
+        const result = await runAgentShell(request, toolSignal, undefined, limits, delegation);
+        return {
+          content: [{ type: "text" as const, text: formatRunOutput(result) }],
+          details: result.details,
+        };
+      }
+
       const job = jobs.start(
         (signal, jobId) =>
           runAgentShell(
-            {
-              agent_type: params.agent_type,
-              cwd: params.cwd ?? ctx.cwd,
-              prompt: params.prompt,
-              model: params.model,
-              effort: params.effort,
-              session_id: params.resume_session_id ?? undefined,
-              auto_approve: params.auto_approve,
-              allowed_tools: params.allowed_tools,
-              disallowed_tools: params.disallowed_tools,
-              interactive: interactive.interactive,
-              stay_open: interactive.stay_open,
-              inactivity_timeout: interactive.inactivity_timeout,
-              inactivity_enabled: interactive.inactivity_enabled,
-            },
+            request,
             signal,
             (update) => {
               jobs.recordActivity(jobId, update.activity);
@@ -920,6 +933,7 @@ async function registerSubagentTool(
               }
             },
             limits,
+            delegation,
           ),
         {
           taskName: params.task_name,
@@ -1051,12 +1065,18 @@ function registerRosterTool(pi: ExtensionAPI, roster: AgentShellRosterConfig): v
 export default async function subagentsExtension(
   pi: ExtensionAPI,
 ): Promise<void> {
-  if (process.env.PI_AGENT_SHELL_CHILD === "1") {
+  const inheritedDelegation = inheritedAgentShellDelegation();
+  if (inheritedDelegation === "blocked") {
     return;
   }
 
   const agentDirectory = getAgentDir();
-  const config = loadAgentShellConfig(agentDirectory);
+  const inheritedMaxDepth = inheritedDelegation === "root"
+    ? undefined : inheritedDelegation.maxDepth;
+  const config = loadAgentShellConfig(agentDirectory, inheritedMaxDepth);
+  const delegation = inheritedDelegation === "root"
+    ? Object.freeze({ depth: 0, maxDepth: config.MAX_SUB_AGENT_DEPTH })
+    : inheritedDelegation;
   const limits: AgentShellLimits = config;
   const jobs = new JobRegistry(limits.maxOutputBytes);
   const deliveries = new Map<string, TerminalJobStatus>();
@@ -1142,9 +1162,9 @@ export default async function subagentsExtension(
     description: "Toggle the global preferred subagent roster",
     handler: async (_args, ctx) => {
       try {
-        const currentRoster = loadAgentShellConfig(agentDirectory).roster;
+        const currentRoster = loadAgentShellConfig(agentDirectory, inheritedMaxDepth).roster;
         const enabled = !currentRoster.enabled;
-        setRosterEnabled(agentDirectory, enabled);
+        setRosterEnabled(agentDirectory, enabled, inheritedMaxDepth);
         config.roster = { ...currentRoster, enabled };
 
         if (enabled) {
@@ -1245,6 +1265,7 @@ export default async function subagentsExtension(
       supportsAgentShellModelDiscovery(),
       supportsAgentShellInteractive(),
       config.roster.enabled,
+      delegation,
     );
   };
 
@@ -1264,6 +1285,7 @@ export default async function subagentsExtension(
       modelDiscoverySupported,
       interactiveSupported,
       config.roster.enabled,
+      delegation,
     );
 
     if (

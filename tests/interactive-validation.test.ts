@@ -86,6 +86,9 @@ test("runs the real worker in an isolated pane and cleans a retained result", {
       `title = '${notifyTitle}'\n` +
       `root = '${notifyRoot}'\n` +
       "print(visible, flush=True)\n" +
+      "print('depth=' + os.environ.get('PI_AGENT_SHELL_DEPTH', '') +\n" +
+      "      ' max=' + os.environ.get('PI_AGENT_SHELL_MAX_DEPTH', '') +\n" +
+      "      ' child=' + os.environ.get('PI_AGENT_SHELL_CHILD', ''), flush=True)\n" +
       "for record in (\n" +
       "    {'type': 'agent-turn-complete',\n" +
       "     'thread-id': 'notify-title-validation-session',\n" +
@@ -142,7 +145,7 @@ test("runs the real worker in an isolated pane and cleans a retained result", {
       interactive: true,
       stay_open: true,
       inactivity_timeout: 1,
-    });
+    }, undefined, undefined, undefined, { depth: 1, maxDepth: 2 });
 
     assert.match(
       result.output,
@@ -153,6 +156,7 @@ test("runs the real worker in an isolated pane and cleans a retained result", {
     assert.doesNotMatch(result.output, /NOT_VISIBLE_VALIDATION_CODEX_926/);
     assert.doesNotMatch(result.output, /NOT_VISIBLE_VALIDATION_ROOT_926/);
     assert.doesNotMatch(result.output, /notify-(?:title|root)-validation-session/);
+    assert.match(result.output, /depth=2 max=2 child=1/);
     assert.equal(result.details.sessionId, undefined);
     assert.equal(result.details.warnings.length, 1);
     assert.match(

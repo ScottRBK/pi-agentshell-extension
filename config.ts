@@ -43,6 +43,7 @@ export interface AgentShellRosterConfig {
 }
 
 export interface AgentShellConfig extends AgentShellLimits {
+  MAX_SUB_AGENT_DEPTH: number;
   silent: boolean;
   interactive: AgentShellInteractiveConfig;
   roster: AgentShellRosterConfig;
@@ -82,6 +83,7 @@ export function loadAgentShellLimits(
 
 export function loadAgentShellConfig(
   agentDirectory: string,
+  inheritedMaxDepth?: number,
 ): AgentShellConfig {
   const configPath = join(
     agentDirectory,
@@ -92,6 +94,7 @@ export function loadAgentShellConfig(
   if (!existsSync(configPath)) {
     return {
       ...DEFAULT_AGENT_SHELL_LIMITS,
+      MAX_SUB_AGENT_DEPTH: inheritedMaxDepth ?? 0,
       silent: false,
       interactive: { ...DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG },
       roster: { ...DEFAULT_AGENT_SHELL_ROSTER_CONFIG, roles: [] },
@@ -126,6 +129,7 @@ export function loadAgentShellConfig(
 
   const overrides = parsed as Record<string, unknown>;
   const limits = { ...DEFAULT_AGENT_SHELL_LIMITS };
+  let maxSubAgentDepth = inheritedMaxDepth ?? 0;
   let silent = false;
   const interactive = { ...DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG };
   const roster: AgentShellRosterConfig = {
@@ -134,6 +138,19 @@ export function loadAgentShellConfig(
   };
 
   for (const [setting, value] of Object.entries(overrides)) {
+    if (setting === "MAX_SUB_AGENT_DEPTH") {
+      // Descendants use their root's policy, not a later or different local setting.
+      if (inheritedMaxDepth !== undefined) continue;
+      if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+        throw invalidConfiguration(
+          configPath,
+          "MAX_SUB_AGENT_DEPTH must be a nonnegative safe integer",
+        );
+      }
+      maxSubAgentDepth = value;
+      continue;
+    }
+
     if (setting === "silent") {
       if (typeof value !== "boolean") {
         throw invalidConfiguration(configPath, "silent must be a boolean");
@@ -295,11 +312,15 @@ export function loadAgentShellConfig(
     }
   }
 
-  return { ...limits, silent, interactive, roster };
+  return { ...limits, MAX_SUB_AGENT_DEPTH: maxSubAgentDepth, silent, interactive, roster };
 }
 
-export function setRosterEnabled(agentDirectory: string, enabled: boolean): void {
-  loadAgentShellConfig(agentDirectory);
+export function setRosterEnabled(
+  agentDirectory: string,
+  enabled: boolean,
+  inheritedMaxDepth?: number,
+): void {
+  loadAgentShellConfig(agentDirectory, inheritedMaxDepth);
   const extensionDirectory = join(agentDirectory, "extensions");
   const configPath = join(extensionDirectory, "agentshell.json");
   const existing = existsSync(configPath)

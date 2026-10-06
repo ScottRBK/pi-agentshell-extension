@@ -24,6 +24,25 @@ const PYTHON = join(
 
 const WORKER = join(AGENT_SHELL_PROJECT_DIRECTORY, "worker.py");
 
+export interface AgentShellDelegation {
+  readonly depth: number;
+  readonly maxDepth: number;
+}
+
+/** Internal ancestry transport. Incomplete or legacy child metadata must never become a root. */
+export function inheritedAgentShellDelegation(): AgentShellDelegation | "root" | "blocked" {
+  const marker = process.env.PI_AGENT_SHELL_CHILD;
+  const depth = process.env.PI_AGENT_SHELL_DEPTH;
+  const maxDepth = process.env.PI_AGENT_SHELL_MAX_DEPTH;
+  if (marker === undefined && depth === undefined && maxDepth === undefined) return "root";
+
+  const validInteger = (value: string | undefined): value is string =>
+    value !== undefined && /^(0|[1-9]\d*)$/.test(value) && Number.isSafeInteger(Number(value));
+  if (marker !== "1" || !validInteger(depth) || !validInteger(maxDepth)) return "blocked";
+  if (Number(depth) === 0 || Number(depth) > Number(maxDepth)) return "blocked";
+  return Object.freeze({ depth: Number(depth), maxDepth: Number(maxDepth) });
+}
+
 export interface AgentRequest {
   agent_type: string;
   cwd: string;
@@ -363,6 +382,7 @@ async function invokeWorker(
   onLine?: WorkerLineHandler,
   limits: AgentShellLimits = DEFAULT_AGENT_SHELL_LIMITS,
   allowEarlyCompletion = false,
+  delegation?: AgentShellDelegation,
 ): Promise<WorkerProcessResult> {
   if (signal?.aborted) {
     throw new Error("aborted");
@@ -376,6 +396,9 @@ async function invokeWorker(
       env: {
         ...process.env,
         PI_AGENT_SHELL_CHILD: "1",
+        // Only task launches advance ancestry. Discovery workers keep the legacy guard.
+        PI_AGENT_SHELL_DEPTH: delegation ? String(delegation.depth + 1) : undefined,
+        PI_AGENT_SHELL_MAX_DEPTH: delegation ? String(delegation.maxDepth) : undefined,
       },
     },
   );
@@ -760,6 +783,7 @@ export async function runAgentShell(
   signal?: AbortSignal,
   onUpdate?: (update: RunUpdate) => void,
   limits: AgentShellLimits = DEFAULT_AGENT_SHELL_LIMITS,
+  delegation?: AgentShellDelegation,
 ): Promise<RunResult> {
   if (hasInteractiveRequest(request)) {
     if (
@@ -903,6 +927,7 @@ export async function runAgentShell(
     handleLine,
     limits,
     hasRetainedInteractiveRequest(request),
+    delegation,
   );
 
   const interactive = hasInteractiveRequest(request);

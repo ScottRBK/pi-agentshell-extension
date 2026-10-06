@@ -53,7 +53,7 @@ test("packs the complete AgentShell runtime for npm", () => {
   }>;
   assert.ok(manifest);
   assert.equal(manifest.name, "@scottrbk/pi-agentshell-extension");
-  assert.equal(manifest.version, "1.2.2");
+  assert.equal(manifest.version, "1.3.0");
 
   const files = manifest.files.map(({ path }) => path).sort();
   assert.deepEqual(files, EXPECTED_PACKAGE_FILES);
@@ -70,6 +70,8 @@ test("loads the extension when installed as a Pi package", {
     PI_CODING_AGENT_DIR: agentDirectory,
   };
   delete env.PI_AGENT_SHELL_CHILD;
+  delete env.PI_AGENT_SHELL_DEPTH;
+  delete env.PI_AGENT_SHELL_MAX_DEPTH;
 
   try {
     const installed = spawnSync(
