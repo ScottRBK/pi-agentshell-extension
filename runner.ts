@@ -3,6 +3,8 @@ import { accessSync, constants } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import type { AgentShellResources } from "./config.ts";
+
 import {
   DEFAULT_AGENT_SHELL_LIMITS,
   type AgentShellLimits,
@@ -23,6 +25,10 @@ const PYTHON = join(
 );
 
 const WORKER = join(AGENT_SHELL_PROJECT_DIRECTORY, "worker.py");
+
+export function agentShellSetupCommand(): string {
+  return `uv sync --project "${AGENT_SHELL_PROJECT_DIRECTORY}" --locked --no-build`;
+}
 
 export interface AgentShellDelegation {
   readonly depth: number;
@@ -50,6 +56,8 @@ export interface AgentRequest {
   model?: string;
   effort?: string;
   session_id?: string;
+  roster_file?: string;
+  resources?: AgentShellResources;
   auto_approve?: boolean;
   allowed_tools?: string[];
   disallowed_tools?: string[];
@@ -395,6 +403,9 @@ async function invokeWorker(
       stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,
+        // Select this child's roster; never inherit the parent's explicit override.
+        PI_AGENTSHELL_ROSTER_FILE: "roster_file" in request
+          && typeof request.roster_file === "string" ? request.roster_file : undefined,
         PI_AGENT_SHELL_CHILD: "1",
         // Only task launches advance ancestry. Discovery workers keep the legacy guard.
         PI_AGENT_SHELL_DEPTH: delegation ? String(delegation.depth + 1) : undefined,
@@ -864,7 +875,9 @@ export async function runAgentShell(
         throw new Error("AgentShell worker emitted an invalid fatal message");
       }
 
-      failureReasons.push(message.message);
+      const guidance = message.message.startsWith("Session resources require AgentShell 0.5.0")
+        ? `\nRun: ${agentShellSetupCommand()}\nThen restart Pi or run /reload.` : "";
+      failureReasons.push(message.message + guidance);
       return;
     }
 

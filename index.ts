@@ -1,4 +1,5 @@
-import { stripVTControlCharacters } from "node:util";
+import { join, resolve } from "node:path";
+import { isDeepStrictEqual, stripVTControlCharacters } from "node:util";
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
@@ -12,9 +13,12 @@ import { Type } from "typebox";
 
 import {
   loadAgentShellConfig,
+  loadAgentShellRosterFile,
+  resolveSessionResources,
   setRosterEnabled,
   type AgentShellInteractiveConfig,
   type AgentShellRosterConfig,
+  type AgentShellRosterRole,
 } from "./config.ts";
 import {
   JobRegistry,
@@ -25,6 +29,7 @@ import {
 import type { AgentShellLimits } from "./limits.ts";
 import {
   AGENT_SHELL_PROJECT_DIRECTORY,
+  agentShellSetupCommand,
   closeAgentShellWorkers,
   getAgentShellModels,
   getSupportedAgentTypes,
@@ -34,11 +39,13 @@ import {
   supportsAgentShellInteractive,
   supportsAgentShellModelDiscovery,
   type AgentShellDelegation,
+  type AgentRequest,
   type RunResult,
 } from "./runner.ts";
 
 const UV_INSTALL_URL =
   "https://docs.astral.sh/uv/getting-started/installation/";
+const LAUNCH_ENTRY_TYPE = "agentshell-session-launch";
 const OUTPUT_MODE_ENTRY_TYPE = "agentshell-output-mode";
 const JOB_RESULT_MESSAGE_TYPE = "agentshell-job-result";
 const JOB_WIDGET_KEY = "agentshell-jobs";
@@ -52,7 +59,31 @@ const RESUME_SESSION_GUIDANCE = [
   "For a resumed session, the value must come from an earlier successful " +
     "subagent result.",
   "Do not pass `new`, a background Job ID, or a newly generated UUID.",
+  "For a known selected session, omit repeated launch settings to reuse its recorded selection.",
+  "Approval/tool controls are call-only: omitted auto_approve is false; " +
+    "omitted tool lists are not reused.",
+  "Roster-defined model/effort stay fixed; ad-hoc model/effort and " +
+    "operational controls may change.",
+  "Do not resume an active session, including one already being resumed; " +
+    "concurrent resumes are not prevented.",
 ].join(" ");
+
+interface SavedLaunch {
+  version: 1;
+  sessionId: string;
+  request: Omit<AgentRequest, "prompt" | "session_id">;
+  rosterSource?: string;
+  role?: AgentShellRosterRole;
+  childRoster?: AgentShellRosterConfig;
+}
+
+function launchKey(launch: SavedLaunch): string {
+  return JSON.stringify([launch.request.agent_type, launch.sessionId]);
+}
+
+function jsonSnapshot<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
 
 type TerminalJobStatus = Exclude<JobStatus, "running">;
 
@@ -69,14 +100,6 @@ interface PendingTerminalMessage {
   output: string;
   warnings: string[];
   silent: boolean;
-}
-
-function setupCommand(): string {
-  return [
-    "uv sync --project",
-    `"${AGENT_SHELL_PROJECT_DIRECTORY}"`,
-    "--locked",
-  ].join(" ");
 }
 
 interface InteractiveLaunchSettings {
@@ -740,7 +763,10 @@ async function registerSubagentTool(
   isShuttingDown: () => boolean,
   modelDiscoverySupported: boolean,
   interactiveSupported: boolean,
-  rosterEnabled: boolean,
+  getRoster: () => AgentShellRosterConfig,
+  rosterSource: string,
+  savedLaunches: Map<string, SavedLaunch>,
+  retainedLaunches: Set<string>,
   delegation: AgentShellDelegation,
 ): Promise<(enabled: boolean) => void> {
   const agentTypes = await getSupportedAgentTypes(limits);
@@ -767,13 +793,38 @@ async function registerSubagentTool(
       RESUME_SESSION_GUIDANCE,
       ...(enabled ? [
         "Before delegating, check subagent_roster for preferred roles and settings.",
-        "Roster entries are advisory; pass the chosen agent_type, model, and effort explicitly.",
+        "Pass roster_entry by name to apply that child's launch settings.",
       ] : []),
     ].join(" "),
     parameters: Type.Object({
-      agent_type: StringEnum(agentTypes, {
-        description: "AgentShell agent type to run",
-      }),
+      agent_type: Type.Optional(StringEnum(agentTypes, {
+        description: "Harness; required unless roster_entry or a known resume is used",
+      })),
+      roster_entry: Type.Optional(Type.String({
+        minLength: 1,
+        description: "Name from subagent_roster. Conflicting manual launch settings are rejected.",
+      })),
+      roster_file: Type.Optional(Type.String({
+        minLength: 1,
+        description: "Pi-only child roster file; relative to effective cwd for ad-hoc calls",
+      })),
+      resources: Type.Optional(Type.Object({
+        skills: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+        plugins: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+        extensions: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+        packages: Type.Optional(Type.Array(Type.String(), { maxItems: 0 })),
+        mcp_servers: Type.Optional(Type.Union([
+          Type.Null(), Type.Array(Type.String(), { maxItems: 0 }),
+        ])),
+        inherit_personal_resources: Type.Optional(Type.Boolean()),
+        inherit_project_resources: Type.Optional(Type.Boolean()),
+        include_instruction_files: Type.Optional(Type.Boolean()),
+        include_home_system_prompt: Type.Optional(Type.Boolean()),
+      }, {
+        additionalProperties: false,
+        description: "Local resource paths and discovery controls; paths are relative to cwd. " +
+          "Provision files first. Unsupported selections fail; resources stay fixed on resume.",
+      })),
       task_name: Type.String({
         minLength: 1,
         maxLength: 40,
@@ -808,7 +859,7 @@ async function registerSubagentTool(
       auto_approve: Type.Optional(Type.Boolean({
         description:
           "Allow the subagent to approve tool use automatically. " +
-          "Defaults to false for headless runs. Interactive runs use " +
+          "Defaults to false on every call, including resumes. Interactive runs use " +
           "the agent's native permission prompts.",
       })),
       allowed_tools: Type.Optional(Type.Array(
@@ -817,7 +868,8 @@ async function registerSubagentTool(
           minItems: 1,
           description:
             "Tool names the subagent may use for headless runs, when " +
-            "supported. Interactive runs use native permission controls " +
+            "supported. Applies only to this call; omit for no explicit list. " +
+            "Interactive runs use native permission controls " +
             "and reject unsupported options.",
         },
       )),
@@ -827,7 +879,8 @@ async function registerSubagentTool(
           minItems: 1,
           description:
             "Tool names the subagent must not use for headless runs, when " +
-            "supported. Interactive runs use native permission controls " +
+            "supported. Applies only to this call; omit for no explicit list. " +
+            "Interactive runs use native permission controls " +
             "and reject unsupported options.",
         },
       )),
@@ -861,7 +914,7 @@ async function registerSubagentTool(
     renderCall(args, theme) {
       let text =
         theme.fg("toolTitle", theme.bold("Subagent ")) +
-        theme.fg("accent", args.agent_type);
+        theme.fg("accent", args.roster_entry ?? args.agent_type ?? "resume");
 
       if (args.model) {
         text += theme.fg("muted", ` · model: ${args.model}`);
@@ -886,6 +939,37 @@ async function registerSubagentTool(
 
     async execute(_toolCallId, params, toolSignal, _onUpdate, ctx) {
       const silent = isSilentMode();
+      if (params.resume_session_id === "new" || params.resume_session_id?.startsWith("job-")) {
+        throw new Error(`Use a returned native Session ID. ${RESUME_SESSION_GUIDANCE}`);
+      }
+      const candidates = params.resume_session_id ? [...savedLaunches.values()]
+        .filter((entry) => entry.sessionId === params.resume_session_id) : [];
+      const saved = candidates.length === 1 ? candidates[0]
+        : candidates.find((entry) => entry.request.agent_type === params.agent_type);
+      if (candidates.length && !saved) {
+        throw new Error("Ambiguous native session ID; specify the original agent_type");
+      }
+      const resumeKey = saved ? launchKey(saved)
+        : JSON.stringify([params.agent_type, params.resume_session_id]);
+      if (params.resume_session_id && retainedLaunches.has(resumeKey)) {
+        throw new Error("This retained interactive session may still be running. "
+          + "Shut down or reload its owning Pi session before resuming it here.");
+      }
+      if (params.resume_session_id && !saved && (params.roster_entry !== undefined
+        || params.resources !== undefined || params.roster_file !== undefined)) {
+        throw new Error("No recorded launch; cannot verify this session's original selection");
+      }
+      if (saved) {
+        if (params.roster_entry !== undefined && params.roster_entry !== saved.role?.name) {
+          throw new Error("Resume requires the original roster entry");
+        }
+        // Restore launch defaults, but approval/tool controls belong only to this call.
+        params = { ...saved.request, ...params,
+          auto_approve: params.auto_approve,
+          allowed_tools: params.allowed_tools,
+          disallowed_tools: params.disallowed_tools,
+          roster_entry: params.roster_entry ?? saved.role?.name };
+      }
       const interactive = resolveInteractiveLaunchSettings(
         params,
         interactiveConfig,
@@ -894,17 +978,67 @@ async function registerSubagentTool(
       if (interactive.interactive && !interactiveSupported) {
         throw new Error([
           "Interactive AgentShell runs need an updated runtime.",
-          `Run: ${setupCommand()}`,
+          `Run: ${agentShellSetupCommand()}`,
           "Then restart Pi or run /reload.",
         ].join("\n"));
       }
 
+      if (params.cwd !== undefined) params = { ...params, cwd: resolve(ctx.cwd, params.cwd) };
+      const roster = getRoster();
+      const role = params.roster_entry === undefined ? undefined
+        : roster.roles.find((entry) => entry.name === params.roster_entry);
+      if (params.roster_entry !== undefined && !roster.enabled) {
+        throw new Error(saved?.role
+          ? `Original roster entry "${saved.role.name}" is now disabled; re-enable its roster.`
+          : `Roster is disabled; cannot select entry "${params.roster_entry}".`);
+      }
+      if (params.roster_entry !== undefined && role === undefined) {
+        throw new Error(`Unknown roster entry "${params.roster_entry}"`);
+      }
+      if ((role?.agent_type ?? params.agent_type) !== "pi"
+        && (role?.roster_file !== undefined || params.roster_file !== undefined)) {
+        throw new Error('roster_file is supported only for agent_type "pi"');
+      }
+      if (saved?.role && !isDeepStrictEqual(role, saved.role)) {
+        const changed = (["name", "description", "agent_type", "model", "effort", "cwd",
+          "resources", "roster_file"] as const)
+          .filter((key) => !isDeepStrictEqual(role?.[key], saved.role?.[key]));
+        throw new Error(`Original roster_entry changed: ${changed.join(", ")}`);
+      }
+      for (const key of ["agent_type", "model", "effort", "cwd"] as const) {
+        if (role?.[key] !== undefined && params[key] !== undefined && params[key] !== role[key]) {
+          throw new Error(`Manual ${key} conflicts with roster entry "${role.name}"`);
+        }
+      }
+      const cwd = role?.cwd ?? params.cwd ?? ctx.cwd;
+      const manualResources = params.resources === undefined ? undefined
+        : resolveSessionResources(params.resources, cwd);
+      const manualRosterFile = params.roster_file === undefined ? undefined
+        : resolve(cwd, params.roster_file);
+      for (const [key, manual, selected] of [
+        ["resources", manualResources, role?.resources],
+        ["roster_file", manualRosterFile, role?.roster_file],
+      ] as const) {
+        if (role && manual !== undefined && !isDeepStrictEqual(manual, selected)) {
+          throw new Error(`Manual ${key} conflicts with roster entry "${role.name}"`);
+        }
+      }
+      const effective = { ...params, ...role,
+        resources: role?.resources ?? manualResources,
+        roster_file: role?.roster_file ?? manualRosterFile };
+      const childRoster = effective.roster_file === undefined ? undefined
+        : loadAgentShellRosterFile(effective.roster_file);
+      if (!effective.agent_type || !agentTypes.includes(effective.agent_type)) {
+        throw new Error("Provide a supported agent_type or roster_entry");
+      }
       const request = {
-        agent_type: params.agent_type,
-        cwd: params.cwd ?? ctx.cwd,
+        agent_type: effective.agent_type,
+        cwd: effective.cwd ?? ctx.cwd,
         prompt: params.prompt,
-        model: params.model,
-        effort: params.effort,
+        model: effective.model,
+        effort: effective.effort,
+        roster_file: effective.roster_file,
+        resources: effective.resources,
         session_id: params.resume_session_id ?? undefined,
         auto_approve: params.auto_approve,
         allowed_tools: params.allowed_tools,
@@ -912,8 +1046,37 @@ async function registerSubagentTool(
         ...interactive,
       };
 
+      const { prompt: _prompt, session_id: _sessionId, ...settings } = request;
+      const selection = jsonSnapshot({
+        request: { ...settings, auto_approve: settings.auto_approve ?? false }, role, childRoster,
+        rosterSource: role ? rosterSource : undefined });
+      if (saved && (saved.role || saved.request.resources || saved.request.roster_file
+        || selection.request.resources || selection.request.roster_file)) {
+        // Only the selected role/resources form a resume contract. Model/effort on ad-hoc
+        // calls and approval/tool/interactive controls remain explicit per-call choices.
+        const changed: string[] = (["agent_type", "cwd", "resources", "roster_file"] as const)
+          .filter((key) => !isDeepStrictEqual(selection.request[key], saved.request[key]));
+        if (selection.rosterSource !== saved.rosterSource) changed.push("roster source");
+        if (!isDeepStrictEqual(selection.childRoster, saved.childRoster)) {
+          changed.push("roster_file contents");
+        }
+        if (changed.length) {
+          throw new Error(`Resume conflicts with original selection: ${changed.join(", ")}`);
+        }
+      }
+      const remember = (result: RunResult): void => {
+        if (!result.details.sessionId || isShuttingDown()) return;
+        const launch: SavedLaunch = {
+          version: 1, sessionId: result.details.sessionId, ...selection,
+        };
+        savedLaunches.set(launchKey(launch), launch);
+        if (request.interactive && request.stay_open) retainedLaunches.add(launchKey(launch));
+        pi.appendEntry(LAUNCH_ENTRY_TYPE, launch);
+      };
+
       if (ctx.mode === "json" || ctx.mode === "print") {
         const result = await runAgentShell(request, toolSignal, undefined, limits, delegation);
+        remember(result);
         return {
           content: [{ type: "text" as const, text: formatRunOutput(result) }],
           details: result.details,
@@ -937,9 +1100,9 @@ async function registerSubagentTool(
           ),
         {
           taskName: params.task_name,
-          agentType: params.agent_type,
-          model: params.model,
-          effort: params.effort,
+          agentType: request.agent_type,
+          model: request.model,
+          effort: request.effort,
         },
       );
 
@@ -950,6 +1113,7 @@ async function registerSubagentTool(
           const status = jobs.get(job.id)?.status === "cancelled"
             ? "cancelled"
             : "completed";
+          if (status === "completed") remember(result);
           const output = status === "cancelled"
             ? "The worker stopped after cancellation."
             : formatRunOutput(result);
@@ -999,7 +1163,7 @@ async function registerSubagentTool(
     },
   });
 
-  registerInvocation(rosterEnabled);
+  registerInvocation(getRoster().enabled);
 
   if (modelDiscoverySupported) {
     registerSubagentModelsTool(pi, agentTypes, limits);
@@ -1047,7 +1211,7 @@ function registerRosterTool(pi: ExtensionAPI, roster: AgentShellRosterConfig): v
   pi.registerTool({
     name: "subagent_roster",
     label: "Subagent roster",
-    description: "List preferred subagent roles and their suggested AgentShell settings.",
+    description: "List child roster entries selectable by name through subagent.roster_entry.",
     parameters: Type.Object({}),
     async execute() {
       return {
@@ -1057,6 +1221,7 @@ function registerRosterTool(pi: ExtensionAPI, roster: AgentShellRosterConfig): v
             ? "No preferred subagent roles are configured."
             : JSON.stringify(roster.roles, null, 2),
         }],
+        details: {},
       };
     },
   });
@@ -1079,6 +1244,9 @@ export default async function subagentsExtension(
     : inheritedDelegation;
   const limits: AgentShellLimits = config;
   const jobs = new JobRegistry(limits.maxOutputBytes);
+  const savedLaunches = new Map<string, SavedLaunch>();
+  const retainedLaunches = new Set<string>();
+  const rosterSource = config.rosterFile ?? join(agentDirectory, "extensions", "agentshell.json");
   const deliveries = new Map<string, TerminalJobStatus>();
   const pendingMessages: PendingTerminalMessage[] = [];
   let parentAgentActive = false;
@@ -1112,12 +1280,28 @@ export default async function subagentsExtension(
     );
   });
 
+  const restoreLaunches = (ctx: ExtensionContext): void => {
+    // Tree navigation must retain contracts already known to this running extension.
+    for (const entry of ctx.sessionManager.getBranch()) {
+      if (entry.type === "custom" && entry.customType === LAUNCH_ENTRY_TYPE) {
+        const launch = entry.data as SavedLaunch | undefined;
+        if (launch?.version === 1 && typeof launch.sessionId === "string"
+          && typeof launch.request?.agent_type === "string") {
+          savedLaunches.set(launchKey(launch), launch);
+        }
+      }
+    }
+  };
+  pi.on("session_tree", (_event, ctx) => restoreLaunches(ctx));
+
   pi.on("session_start", (_event, ctx) => {
     parentAgentActive = false;
     pendingMessages.length = 0;
     deliveries.clear();
     shuttingDown = false;
     silentMode = config.silent;
+    savedLaunches.clear();
+    restoreLaunches(ctx);
 
     for (const entry of ctx.sessionManager.getBranch()) {
       if (
@@ -1139,6 +1323,7 @@ export default async function subagentsExtension(
     shuttingDown = true;
     jobs.cancelAll();
     await closeAgentShellWorkers();
+    retainedLaunches.clear();
     jobs.clear();
     deliveries.clear();
     safelyUpdateJobWidget(ctx, jobs, deliveries);
@@ -1159,12 +1344,13 @@ export default async function subagentsExtension(
   });
 
   pi.registerCommand("agentshell-roster", {
-    description: "Toggle the global preferred subagent roster",
+    description: "Toggle the selected roster (session-only for an explicit roster file)",
     handler: async (_args, ctx) => {
       try {
-        const currentRoster = loadAgentShellConfig(agentDirectory, inheritedMaxDepth).roster;
+        const currentRoster = config.rosterFile ? config.roster
+          : loadAgentShellConfig(agentDirectory, inheritedMaxDepth).roster;
         const enabled = !currentRoster.enabled;
-        setRosterEnabled(agentDirectory, enabled, inheritedMaxDepth);
+        if (!config.rosterFile) setRosterEnabled(agentDirectory, enabled, inheritedMaxDepth);
         config.roster = { ...currentRoster, enabled };
 
         if (enabled) {
@@ -1264,7 +1450,10 @@ export default async function subagentsExtension(
       () => shuttingDown,
       supportsAgentShellModelDiscovery(),
       supportsAgentShellInteractive(),
-      config.roster.enabled,
+      () => config.roster,
+      rosterSource,
+      savedLaunches,
+      retainedLaunches,
       delegation,
     );
   };
@@ -1284,7 +1473,10 @@ export default async function subagentsExtension(
       () => shuttingDown,
       modelDiscoverySupported,
       interactiveSupported,
-      config.roster.enabled,
+      () => config.roster,
+      rosterSource,
+      savedLaunches,
+      retainedLaunches,
       delegation,
     );
 
@@ -1302,7 +1494,7 @@ export default async function subagentsExtension(
         if (!modelDiscoverySupported) {
           notices.push([
             "Model discovery needs an updated AgentShell runtime.",
-            `Run: ${setupCommand()}`,
+            `Run: ${agentShellSetupCommand()}`,
             "Then restart Pi or run /reload.",
           ].join("\n"));
         }
@@ -1310,7 +1502,7 @@ export default async function subagentsExtension(
         if (config.interactive.enabled && !interactiveSupported) {
           notices.push([
             "Interactive runs need an updated AgentShell runtime.",
-            `Run: ${setupCommand()}`,
+            `Run: ${agentShellSetupCommand()}`,
             "Then restart Pi or run /reload.",
           ].join("\n"));
         }
@@ -1333,7 +1525,7 @@ export default async function subagentsExtension(
     }
 
     setupAttempted = true;
-    const command = setupCommand();
+    const command = agentShellSetupCommand();
 
     if (!ctx.hasUI) {
       process.stderr.write(
@@ -1389,6 +1581,7 @@ export default async function subagentsExtension(
         "--project",
         AGENT_SHELL_PROJECT_DIRECTORY,
         "--locked",
+        "--no-build",
       ],
     );
 

@@ -17,6 +17,7 @@ const EXPECTED_PACKAGE_FILES = [
   "README.md",
   "config.ts",
   "docs/assets/architecture.png",
+  "docs/session-rosters.md",
   "extensions/agentshell.ts",
   "index.ts",
   "jobs.ts",

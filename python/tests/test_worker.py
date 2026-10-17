@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import unittest
+import shutil
 from agent_shell.models.agent import AgentType
 
 from pathlib import Path
@@ -14,11 +15,90 @@ WORKER = PYTHON_DIR / "worker.py"
 FAKE_BIN = PYTHON_DIR / "tests" / "fixtures" / "bin"
 
 class WorkerProtocolTest(unittest.TestCase):
-    def test_uses_the_interactive_agent_shell_release(self) -> None:
+    def test_uses_the_session_resources_agent_shell_release(self) -> None:
        self.assertEqual(
            importlib.metadata.version("agent-shell-py"),
-           "0.4.0",
+           "0.5.0",
        )
+
+    def test_headless_forwards_local_session_resources(self) -> None:
+        # Arrange: run the real worker/AgentShell, replacing only the native CLI.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "bin"
+            binary.mkdir()
+            fake = binary / "pi"
+            shutil.copy(PYTHON_DIR.parent / "tests/fixtures/roster-agent.py", fake)
+            fake.chmod(0o755)
+            skill = root / "skill.md"
+            extension = root / "extension.ts"
+            skill.write_text("# Local skill")
+            extension.write_text("export default function () {}")
+            # Act
+            completed, messages = self.run_worker({
+                "agent_type": "pi", "cwd": directory, "prompt": "Report arguments",
+                "resources": {
+                    "skills": [str(skill)], "extensions": [str(extension)],
+                    "mcp_servers": [], "inherit_personal_resources": False,
+                    "inherit_project_resources": False, "include_home_system_prompt": False,
+                },
+            }, extra_env={"PATH": str(binary), "HOME": directory,
+                          "XDG_STATE_HOME": str(root / "state"),
+                          "PI_CODING_AGENT_DIR": str(root / "native-home")})
+            # Assert: actual native arguments, not assertions against library helpers.
+            self.assertEqual(completed.returncode, 0, messages)
+            report = json.loads(next(m["event"]["content"] for m in messages
+                                     if m.get("event", {}).get("type") == "text"))
+            args = report["args"]
+            for flag in ("--no-extensions", "--no-skills", "--no-prompt-templates",
+                         "--no-themes", "--offline", "--no-mcp", "--system-prompt"):
+                self.assertIn(flag, args)
+            self.assertEqual(args[args.index("--skill") + 1], str(skill))
+            self.assertEqual(args[args.index("--extension") + 1], str(extension))
+            self.assertEqual(args[args.index("--system-prompt") + 1], "")
+            self.assertNotIn("--no-context-files", args)
+            self.assertEqual(report["home"], str(root / "native-home"))
+
+    def test_invalid_or_unsupported_resources_never_launch_a_native_agent(self) -> None:
+        # Arrange
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "started"
+            plugin = root / "plugin"
+            plugin.mkdir()
+            binary = root / "bin"
+            binary.mkdir()
+            fake = binary / "pi"
+            shutil.copy(PYTHON_DIR.parent / "tests/fixtures/roster-agent.py", fake)
+            fake.chmod(0o755)
+            cases = [
+                (None, "resources must be a JSON object"),
+                ({"packages": [{"source": "npm:never-install@1.0.0"}]},
+                 "packages supports only []"),
+                ({"mcp_servers": [{"name": "remote"}]}, "mcp_servers supports only []"),
+                ({"skills": ["missing.md"]}, "does not exist"),
+                ({"unknown": True}, "Unknown resources setting"),
+                ({"inherit_personal_resources": False}, "only together"),
+                ({"inherit_personal_resources": False, "inherit_project_resources": False},
+                 "requires mcp_servers=[]"),
+                ({"plugins": [str(plugin)]}, "not plugins"),
+            ]
+            for interactive in (False, True):
+                for resources, expected in cases:
+                    with self.subTest(interactive=interactive, resources=resources):
+                        # Act
+                        completed, messages = self.run_worker({
+                            "agent_type": "pi", "cwd": directory, "prompt": "Never launch",
+                            "interactive": interactive, "resources": resources,
+                        }, extra_env={"PATH": str(binary), "HOME": directory,
+                                      "XDG_STATE_HOME": str(root / "state"),
+                                      "TMUX": "unused,0,0", "TMUX_PANE": "%0",
+                                      "ROSTER_STARTED": str(marker)})
+                        # Assert
+                        self.assertEqual(completed.returncode, 1, messages)
+                        self.assertEqual(messages[-1]["kind"], "fatal", messages)
+                        self.assertIn(expected, messages[-1]["message"])
+                        self.assertFalse(marker.exists())
 
     def test_lists_agent_types_from_agent_shell(self) -> None:
        completed, messages = self.run_worker({
@@ -545,7 +625,7 @@ class WorkerProtocolTest(unittest.TestCase):
         if not os.access(fake_codex, os.X_OK):
             raise AssertionError(f"fake Codex is not executable: {fake_codex}")
 
-        env["PATH"] = str(FAKE_BIN)
+        env["PATH"] = (extra_env or {}).get("PATH", str(FAKE_BIN))
 
 
         completed = subprocess.run(

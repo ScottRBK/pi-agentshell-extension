@@ -22,6 +22,7 @@
   "files": [
     "config.ts",
     "docs/assets/architecture.png",
+    "docs/session-rosters.md",
     "extensions/agentshell.ts",
     "index.ts",
     "jobs.ts",
