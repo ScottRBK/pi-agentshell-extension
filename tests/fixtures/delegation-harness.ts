@@ -34,6 +34,7 @@ async function loadExtension() {
       startup.push(name);
       commands.set(name, command);
     },
+    appendEntry() {},
     registerMessageRenderer() { startup.push("renderer"); },
     on(event: string, handler: (event: unknown, ctx: unknown) => Promise<void>) {
       startup.push(event);

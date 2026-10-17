@@ -61,6 +61,7 @@ await command.handler("", context);
 assert.equal(active.includes("subagent_roster"), true);
 assert.match(tools.get("subagent")!.description, /subagent_roster/);
 const roster = await tools.get("subagent_roster")!.execute("roster-call", {});
+assert.ok("details" in roster, "Pi tool results include details");
 assert.match(roster.content[0]!.text, /reviewer/);
 assert.match(roster.content[0]!.text, /Review code for defects/);
 assert.match(roster.content[0]!.text, /codex/);

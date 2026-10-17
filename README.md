@@ -38,7 +38,7 @@ pi install git:github.com/ScottRBK/pi-agentshell-extension
 The first time Pi starts with the extension installed, it will:
 
 - Check whether `uv` is available
-- Ask for permission to run `uv sync --locked`, which installs AgentShell
+- Ask for permission to run `uv sync --locked --no-build`, which installs the AgentShell wheel
 - Register the tool immediately after setup
 
 ## Usage
@@ -56,20 +56,23 @@ The tool accepts the following parameters:
 
 | Parameter | Required | Description |
 | --- | :---: | --- |
-| `agent_type` | Yes | AgentShell agent type, such as `claude_code`, `codex`, or `grok`. |
-| `task_name` | Yes | Short display name for the job, from 1 to 40 characters. |
+| `agent_type` | Conditional | Harness, e.g. `pi`; optional for named/known resumed calls. |
+| `roster_entry` | No | Child entry name from `subagent_roster`; applies its launch settings. |
+| `task_name` | Yes | Display name, 1–40 characters. |
 | `prompt` | Yes | Task given to the subagent. |
-| `cwd` | No | Working directory; defaults to Pi's current working directory. |
+| `cwd` | No | Working directory; defaults to Pi's current directory. |
 | `model` | No | Model identifier passed to AgentShell. |
 | `effort` | No | Reasoning effort; supported values depend on the agent. |
-| `resume_session_id` | No | Prior session ID; omit or use `null` for new sessions. |
-| `auto_approve` | No | Allows automatic tool approval; defaults to `false`. |
+| `resources` | No | Local resource selection; see [session rosters](docs/session-rosters.md). |
+| `roster_file` | No | Pi-only child roster; omitted means ordinary default behavior. |
+| `resume_session_id` | No | Returned native session ID; omit or use `null` for a new session. |
+| `auto_approve` | No | Automatic tool approval; defaults to `false`. |
 | `allowed_tools` | No | Tool allow-list; support varies by agent. |
 | `disallowed_tools` | No | Tool deny-list; support varies by agent. |
-| `interactive` | No | Open the native agent UI in a neighbouring tmux pane; default `false`. |
-| `stay_open` | No | Keep the interactive pane after delivering its result; default `false`. |
-| `inactivity_timeout` | No | Seconds of inactivity before inferred completion; default `60`. |
-| `inactivity_enabled` | No | Enable inactivity completion for agents without a reliable event. |
+| `interactive` | No | Native UI in a neighbouring tmux pane; default `false`. |
+| `stay_open` | No | Keep an interactive pane after its result; default `false`. |
+| `inactivity_timeout` | No | Seconds before inferred completion; default `60`. |
+| `inactivity_enabled` | No | Allow inferred completion without a reliable agent event. |
 
 AgentShell warnings are included in the completion message when an agent cannot enforce a control.
 
@@ -118,7 +121,8 @@ against background title notifications and normal answers.
 
 Interactive mode keeps native permission prompts enabled. `auto_approve: true` and
 `disallowed_tools` are rejected; `allowed_tools` is supported only where the interactive agent
-adapter can enforce it. The AgentShell interactive API is experimental and requires v0.4.0.
+adapter can enforce it. The AgentShell interactive API is experimental. This extension pins
+AgentShell 0.5.0; explicit session resources need that version in both launch modes.
 
 Set defaults in `~/.pi/agent/extensions/agentshell.json` (or the same path under your custom Pi
 agent directory). These are the built-in values:
@@ -239,9 +243,10 @@ Run `/reload` after changing the file. Saved session choices override the global
 existing session may still need `/agentshell-silent` once. If `silent` is omitted or `false`, new
 sessions start with normal output.
 
-### Preferred Subagent Roster
+### Child Agent Rosters
 
-Define preferred agent roles in `~/.pi/agent/extensions/agentshell.json`:
+A roster describes the **children this Pi session can launch**, not this session's own resources.
+Define entries in `~/.pi/agent/extensions/agentshell.json`:
 
 ```json
 {
@@ -260,19 +265,39 @@ Define preferred agent roles in `~/.pi/agent/extensions/agentshell.json`:
 }
 ```
 
-Run `/agentshell-roster` to switch the roster on or off for all Pi sessions. The command saves
-`roster.enabled` in this file; the default is off. When on, `subagent_roster` lists the roles and
-the `subagent` tool suggests checking it before delegation. The roster is advisory: the parent
-agent chooses a role and passes its `agent_type`, `model`, and `effort` through the existing
-`subagent` arguments. It can also choose other settings. Role names and descriptions are for the
-parent agent; they do not change how AgentShell launches a subagent.
+`/agentshell-roster` toggles this default roster globally, as before. When enabled,
+`subagent_roster` lists entries. Select one by name rather than reconstructing its flags:
 
-The switch takes effect immediately in the current Pi process. Run `/reload` in any other open Pi
-process to pick up the new setting.
+```text
+subagent({
+  roster_entry: "reviewer",
+  task_name: "Review changes",
+  prompt: "Review the current diff for defects."
+})
+```
 
-Every role needs all five fields shown above. Names must be unique. Use an AgentShell agent type
-and a model selector that your runtime supports; `subagent_list_models` can show current selectors.
-Run `/reload` after editing roles by hand.
+Explicit/ad-hoc calls using `agent_type` still work. Unknown entries and conflicting manual
+settings are rejected before starting a job or worker. Every entry requires the five fields above;
+names are unique and case-sensitive. Optional `cwd`, `resources`, and `roster_file` select that
+child's directory, resources, and roster for its own children. `roster_file` is Pi-only; other
+harnesses can still use supported generic resources in the same roster.
+
+To select a different roster without changing Pi home, login, or personal preferences:
+
+```bash
+PI_AGENTSHELL_ROSTER_FILE=/workspace/agents/lead/roster.json pi
+```
+
+The selected JSON file contains **only** the `roster` key, with the same shape above. It cannot
+change output limits, interactive defaults, silent mode, or delegation depth. Explicit missing or
+invalid files fail; they never fall back to the personal roster. Referenced paths and entries are
+validated even when the roster is disabled. With an override,
+`/agentshell-roster` toggles only this process's in-memory roster and writes neither file.
+Reload restores the file's `enabled` value. Without an override, existing default behavior remains.
+
+See [session rosters](docs/session-rosters.md) for the complete resource shape, path rules,
+child environment handling, resume guarantees, and external-launcher requirements. Run `/reload`
+after editing a roster. See also the [worker dependency audit](docs/agentshell-0.5-audit.md).
 
 ### Resuming a Subagent
 
@@ -298,7 +323,22 @@ pass the exact session ID back as `resume_session_id`:
 The value must come from an earlier successful subagent result. Do not pass `new`, a background Job
 ID, or a newly generated UUID.
 
-The subagent harness owns the stored session; this extension only forwards the ID.
+The harness owns the native conversation. After a successful result, the extension also saves
+launch defaults in the parent Pi session branch. Startup/reload reads the current branch only.
+Tree navigation adds visited branch records without forgetting selections known to this running
+extension. A known selected session needs only `task_name`, `prompt`, and `resume_session_id`;
+omitted selection settings reuse its recorded role. Roster-defined model/effort, harness, cwd,
+resources and child roster stay consistent. Neither omitting `roster_entry` nor leaving its branch
+can switch a known selected session to an ad-hoc role within that runtime.
+
+Ordinary ad-hoc resumes still accept explicit changes, including model/effort. Ad-hoc resource
+selections keep resources/cwd consistent without fixing model/effort. Approval/tool controls apply
+only to the current call: omitted `auto_approve` is false, and omitted tool lists are not reused.
+Interactive/inactivity options still default from the saved launch. Native support checks and
+retained-process safety still apply.
+Do not resume active sessions: concurrent resumes of the same ID are not prevented. These records
+provide configuration continuity, not live-job or crash recovery. See the
+[precise limits](docs/session-rosters.md#resumption).
 
 ### Nested Delegation
 
@@ -380,8 +420,9 @@ pi remove npm:@scottrbk/pi-agentshell-extension
 Install Pi, uv, and tmux, then run:
 
 ```bash
-uv sync --project python --locked
-env -u PI_AGENT_SHELL_CHILD -u PI_AGENT_SHELL_DEPTH -u PI_AGENT_SHELL_MAX_DEPTH npm test
+uv sync --project python --locked --no-build
+env -u PI_AGENT_SHELL_CHILD -u PI_AGENT_SHELL_DEPTH -u PI_AGENT_SHELL_MAX_DEPTH \
+  -u PI_AGENTSHELL_ROSTER_FILE npm test
 npm run test:python
 ```
 

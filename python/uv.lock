@@ -1,14 +1,14 @@
 version = 1
-revision = 2
+revision = 5
 requires-python = ">=3.12"
 
 [[package]]
 name = "agent-shell-py"
-version = "0.4.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/7e/2d/162e36c35d65d2c76cad9c5f11fdbf35e072fa099c2d191e5a600fd1edc7/agent_shell_py-0.4.0.tar.gz", hash = "sha256:211f0820849bd778df1e6337583089d6fc2871e699c5dd1b128bb68c52fff6c3", size = 745326, upload-time = "2026-09-06T20:00:34.456Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/73/c4/06d2869a72171955281c97d80eb8a200bbc0789236d4dd3b45a4d53fdfe9/agent_shell_py-0.5.0.tar.gz", hash = "sha256:987cdc093587c80c2304efd6735485c79538de190664a54caa25b29fa1bb717e", size = 797988, upload-time = "2026-10-15T23:49:18.645Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/45/ec1e41e2f41eb840deef04dd5bbbddb72ebaabbe781378af986e53e66258/agent_shell_py-0.4.0-py3-none-any.whl", hash = "sha256:fb06a6bba1a0bccc1bcaac07719837a74e09138569ad4938d9a5874bbb889dc3", size = 108592, upload-time = "2026-09-06T20:00:32.981Z" },
+    { url = "https://files.pythonhosted.org/packages/21/20/9fc8a6b53ea9f23e1fb704920188cfa8f495a7a6b2d5338a59e3f3869777/agent_shell_py-0.5.0-py3-none-any.whl", hash = "sha256:57b0b8b8aa87ab165f1bcf301c2da447e3bae97afd9a69ed074a75ffcff59f43", size = 121692, upload-time = "2026-10-15T23:49:17.408Z" },
 ]
 
 [[package]]
@@ -20,4 +20,4 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "agent-shell-py", specifier = "==0.4.0" }]
+requires-dist = [{ name = "agent-shell-py", specifier = "==0.5.0" }]

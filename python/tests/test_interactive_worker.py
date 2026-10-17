@@ -22,6 +22,37 @@ CODEX_VISIBLE_JSON = '{"answer":"VISIBLE_CODEX_JSON_926"}'
 
 
 class InteractiveWorkerTest(unittest.TestCase):
+    def test_interactive_forwards_local_session_resources(self) -> None:
+        # Arrange: a real isolated tmux host and real AgentShell with a native Pi double.
+        def install(path):
+            shutil.copy(PYTHON_DIR.parent / "tests/fixtures/roster-agent.py", path)
+            path.chmod(0o755)
+            (path.parent.parent / "skill.md").write_text("# Local skill")
+            (path.parent.parent / "extra.ts").write_text("export default function () {}")
+
+        with self.launch_worker("pi", install, {
+            "agent_type": "pi", "prompt": "Report resources", "interactive": True,
+            "resources": {
+                "skills": ["./skill.md"], "extensions": ["./extra.ts"], "mcp_servers": [],
+                "inherit_personal_resources": False, "inherit_project_resources": False,
+                "include_home_system_prompt": False,
+            },
+        }) as (process, root, _socket, _session, _pane):
+            # Act
+            messages = self.read_until(process, "complete", timeout=5)
+            process.wait(timeout=5)
+            # Assert: both native exclusions and explicit includes survived the interactive API.
+            self.assertEqual(process.returncode, 0, messages)
+            report = json.loads(next(m["event"]["content"] for m in messages
+                                     if m.get("event", {}).get("type") == "text"))
+            args = report["args"]
+            for flag in ("--no-extensions", "--no-skills", "--no-prompt-templates",
+                         "--no-themes", "--offline", "--no-mcp", "--system-prompt"):
+                self.assertIn(flag, args)
+            self.assertIn(str(root / "extra.ts"), args)
+            self.assertEqual(args[args.index("--skill") + 1], str(root / "skill.md"))
+            self.assertNotIn("--no-context-files", args)
+
     def test_interactive_rejects_unsupported_permission_controls(self) -> None:
         base_request = {
             "agent_type": "codex",
@@ -101,6 +132,8 @@ class InteractiveWorkerTest(unittest.TestCase):
                 environment = os.environ.copy()
                 environment.update({
                     "PATH": f"{fake_bin}:{environment.get('PATH', '')}",
+                    "HOME": str(root), "XDG_STATE_HOME": str(root / "state"),
+                    "PI_CODING_AGENT_DIR": str(root / "native-home"),
                     "TMUX": f"{socket_path},0,0",
                     "TMUX_PANE": parent_pane,
                 })
@@ -1012,7 +1045,7 @@ class InteractiveWorkerTest(unittest.TestCase):
                 "target=''\n"
                 "previous=''\n"
                 "for argument in \"$@\"; do\n"
-                "  if [ \"$argument\" = \"capture-pane\" ]; then capture=1; fi\n"
+                "  case \"$argument\" in capture-pane|\"capture-pane \"*) capture=1 ;; esac\n"
                 "  if [ \"$previous\" = \"-S\" ] && [ \"$argument\" != \"-\" ] && "
                 "[ \"$has_socket\" -eq 0 ]; then\n"
                 "    tmux_socket=\"$argument\"\n"

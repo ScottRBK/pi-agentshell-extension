@@ -6,9 +6,10 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import {
   DEFAULT_AGENT_SHELL_LIMITS,
@@ -29,12 +30,27 @@ export interface AgentShellInteractiveConfig {
   inactivity_enabled: boolean;
 }
 
+export interface AgentShellResources {
+  skills: string[];
+  plugins: string[];
+  extensions: string[];
+  packages: never[];
+  mcp_servers: never[] | null;
+  inherit_personal_resources: boolean;
+  inherit_project_resources: boolean;
+  include_instruction_files: boolean;
+  include_home_system_prompt: boolean;
+}
+
 export interface AgentShellRosterRole {
   name: string;
   description: string;
   agent_type: string;
   model: string;
   effort: string;
+  cwd?: string;
+  roster_file?: string;
+  resources?: AgentShellResources;
 }
 
 export interface AgentShellRosterConfig {
@@ -47,6 +63,7 @@ export interface AgentShellConfig extends AgentShellLimits {
   silent: boolean;
   interactive: AgentShellInteractiveConfig;
   roster: AgentShellRosterConfig;
+  rosterFile?: string;
 }
 
 export const DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG:
@@ -81,6 +98,155 @@ export function loadAgentShellLimits(
   };
 }
 
+function readConfiguration(path: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw invalidConfiguration(path, error instanceof SyntaxError
+      ? "file must contain valid JSON" : String(error));
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw invalidConfiguration(path, "file must contain a JSON object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function localPath(value: unknown, base: string, field: string): string {
+  if (typeof value !== "string" || !value.trim() || value.includes("\0")) {
+    throw new Error(`${field} must be a non-empty local path without NUL`);
+  }
+  if (/^(?:[a-z]+:|~)/i.test(value)) {
+    throw new Error(`${field} must be a provisioned local path, not a URL, package or ~ path`);
+  }
+  const path = resolve(base, value);
+  const stat = statSync(path, { throwIfNoEntry: false });
+  if (!stat || (field === "cwd" ? !stat.isDirectory()
+    : field === "roster_file" ? !stat.isFile() : !stat.isFile() && !stat.isDirectory())) {
+    throw new Error(`Invalid ${field} path: ${path}`);
+  }
+  return path;
+}
+
+/** The extension accepts provisioned local resources only; it never installs packages. */
+export function resolveSessionResources(value: unknown, base: string): AgentShellResources {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("resources must be a JSON object");
+  }
+  const result: AgentShellResources = {
+    skills: [], plugins: [], extensions: [], packages: [], mcp_servers: null,
+    inherit_personal_resources: true, inherit_project_resources: true,
+    include_instruction_files: true, include_home_system_prompt: true,
+  };
+  for (const [key, setting] of Object.entries(value)) {
+    if (key === "skills" || key === "plugins" || key === "extensions") {
+      if (!Array.isArray(setting)) throw new Error(`resources.${key} must be an array`);
+      result[key] = setting.map((path) => localPath(path, base, `resources.${key}`));
+    } else if (key === "packages" || key === "mcp_servers") {
+      if (key === "mcp_servers" && setting === null) continue;
+      if (!Array.isArray(setting) || setting.length !== 0) {
+        throw new Error(`resources.${key} supports only []; provision local files separately`);
+      }
+      result[key] = [];
+    } else if (key === "inherit_personal_resources" || key === "inherit_project_resources"
+      || key === "include_instruction_files" || key === "include_home_system_prompt") {
+      if (typeof setting !== "boolean") throw new Error(`resources.${key} must be a boolean`);
+      result[key] = setting;
+    } else {
+      throw new Error(`Unknown resources setting "${key}"`);
+    }
+  }
+  return result;
+}
+
+function parseRoster(value: unknown, configPath: string): AgentShellRosterConfig {
+  const roster: AgentShellRosterConfig = { enabled: false, roles: [] };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw invalidConfiguration(configPath, "roster must be a JSON object");
+  }
+
+  for (const [rosterSetting, rosterValue] of Object.entries(value)) {
+    if (rosterSetting === "enabled") {
+      if (typeof rosterValue !== "boolean") {
+        throw invalidConfiguration(configPath, "roster.enabled must be a boolean");
+      }
+      roster.enabled = rosterValue;
+    } else if (rosterSetting === "roles") {
+      if (!Array.isArray(rosterValue)) {
+        throw invalidConfiguration(configPath, "roster.roles must be an array");
+      }
+      const names = new Set<string>();
+      roster.roles = rosterValue.map((role, index) => {
+        if (typeof role !== "object" || role === null || Array.isArray(role)) {
+          throw invalidConfiguration(
+            configPath,
+            `roster.roles[${index}] must be a JSON object`,
+          );
+        }
+        const fields = ["name", "description", "agent_type", "model", "effort"] as const;
+        for (const key of Object.keys(role)) {
+          if (![...fields, "cwd", "roster_file", "resources"].includes(key)) {
+            throw invalidConfiguration(
+              configPath,
+              `unknown roster.roles[${index}] setting "${key}"`,
+            );
+          }
+        }
+        for (const field of fields) {
+          if (typeof role[field] !== "string" || role[field].trim().length === 0) {
+            throw invalidConfiguration(
+              configPath,
+              `roster.roles[${index}].${field} must be a non-empty string`,
+            );
+          }
+        }
+        if ("roster_file" in role && role.agent_type !== "pi") {
+          throw invalidConfiguration(configPath,
+            `roster.roles[${index}].roster_file is supported only for agent_type "pi"`);
+        }
+        const parsedRole = { ...role } as AgentShellRosterRole;
+        try {
+          for (const field of ["cwd", "roster_file"] as const) {
+            if (field in role) {
+              parsedRole[field] = localPath(role[field], dirname(configPath), field);
+            }
+          }
+          if ("resources" in role) {
+            parsedRole.resources = resolveSessionResources(role.resources, dirname(configPath));
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw invalidConfiguration(configPath,
+            `roster.roles[${index}] ("${parsedRole.name}"): ${message}`);
+        }
+        if (names.has(parsedRole.name)) {
+          throw invalidConfiguration(
+            configPath,
+            `duplicate roster role name "${parsedRole.name}"`,
+          );
+        }
+        names.add(parsedRole.name);
+        return parsedRole;
+      });
+    } else {
+      throw invalidConfiguration(
+        configPath,
+        `unknown roster setting "${rosterSetting}"`,
+      );
+    }
+  }
+  return roster;
+}
+
+/** Read a roster-only file, without consulting personal preferences or following child rosters. */
+export function loadAgentShellRosterFile(path: string): AgentShellRosterConfig {
+  const selected = readConfiguration(path);
+  if (Object.keys(selected).length !== 1 || !("roster" in selected)) {
+    throw invalidConfiguration(path, "selected file must contain only the roster key");
+  }
+  return parseRoster(selected.roster, path);
+}
+
 export function loadAgentShellConfig(
   agentDirectory: string,
   inheritedMaxDepth?: number,
@@ -91,51 +257,19 @@ export function loadAgentShellConfig(
     "agentshell.json",
   );
 
-  if (!existsSync(configPath)) {
-    return {
-      ...DEFAULT_AGENT_SHELL_LIMITS,
-      MAX_SUB_AGENT_DEPTH: inheritedMaxDepth ?? 0,
-      silent: false,
-      interactive: { ...DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG },
-      roster: { ...DEFAULT_AGENT_SHELL_ROSTER_CONFIG, roles: [] },
-    };
+  const rosterFile = process.env.PI_AGENTSHELL_ROSTER_FILE;
+  if (rosterFile !== undefined && (!rosterFile.trim() || rosterFile.includes("\0"))) {
+    throw new Error("PI_AGENTSHELL_ROSTER_FILE must be a non-empty path without NUL");
   }
-
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(readFileSync(configPath, "utf8"));
-  } catch (error) {
-    if (error instanceof SyntaxError) {
-      throw invalidConfiguration(
-        configPath,
-        "file must contain valid JSON",
-      );
-    }
-
-    throw error;
-  }
-
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    Array.isArray(parsed)
-  ) {
-    throw invalidConfiguration(
-      configPath,
-      "file must contain a JSON object",
-    );
-  }
-
-  const overrides = parsed as Record<string, unknown>;
+  const selectedPath = rosterFile === undefined ? undefined : resolve(rosterFile);
+  const overrides = existsSync(configPath) ? readConfiguration(configPath) : {};
   const limits = { ...DEFAULT_AGENT_SHELL_LIMITS };
   let maxSubAgentDepth = inheritedMaxDepth ?? 0;
   let silent = false;
   const interactive = { ...DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG };
-  const roster: AgentShellRosterConfig = {
-    ...DEFAULT_AGENT_SHELL_ROSTER_CONFIG,
-    roles: [],
-  };
+  let roster: AgentShellRosterConfig = selectedPath === undefined
+    ? { ...DEFAULT_AGENT_SHELL_ROSTER_CONFIG, roles: [] }
+    : loadAgentShellRosterFile(selectedPath);
 
   for (const [setting, value] of Object.entries(overrides)) {
     if (setting === "MAX_SUB_AGENT_DEPTH") {
@@ -160,62 +294,7 @@ export function loadAgentShellConfig(
     }
 
     if (setting === "roster") {
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        throw invalidConfiguration(configPath, "roster must be a JSON object");
-      }
-
-      for (const [rosterSetting, rosterValue] of Object.entries(value)) {
-        if (rosterSetting === "enabled") {
-          if (typeof rosterValue !== "boolean") {
-            throw invalidConfiguration(configPath, "roster.enabled must be a boolean");
-          }
-          roster.enabled = rosterValue;
-        } else if (rosterSetting === "roles") {
-          if (!Array.isArray(rosterValue)) {
-            throw invalidConfiguration(configPath, "roster.roles must be an array");
-          }
-          const names = new Set<string>();
-          roster.roles = rosterValue.map((role, index) => {
-            if (typeof role !== "object" || role === null || Array.isArray(role)) {
-              throw invalidConfiguration(
-                configPath,
-                `roster.roles[${index}] must be a JSON object`,
-              );
-            }
-            const fields = ["name", "description", "agent_type", "model", "effort"] as const;
-            for (const key of Object.keys(role)) {
-              if (!fields.includes(key as typeof fields[number])) {
-                throw invalidConfiguration(
-                  configPath,
-                  `unknown roster.roles[${index}] setting "${key}"`,
-                );
-              }
-            }
-            for (const field of fields) {
-              if (typeof role[field] !== "string" || role[field].trim().length === 0) {
-                throw invalidConfiguration(
-                  configPath,
-                  `roster.roles[${index}].${field} must be a non-empty string`,
-                );
-              }
-            }
-            const parsedRole = role as AgentShellRosterRole;
-            if (names.has(parsedRole.name)) {
-              throw invalidConfiguration(
-                configPath,
-                `duplicate roster role name "${parsedRole.name}"`,
-              );
-            }
-            names.add(parsedRole.name);
-            return parsedRole;
-          });
-        } else {
-          throw invalidConfiguration(
-            configPath,
-            `unknown roster setting "${rosterSetting}"`,
-          );
-        }
-      }
+      if (selectedPath === undefined) roster = parseRoster(value, configPath);
       continue;
     }
 
@@ -312,7 +391,8 @@ export function loadAgentShellConfig(
     }
   }
 
-  return { ...limits, MAX_SUB_AGENT_DEPTH: maxSubAgentDepth, silent, interactive, roster };
+  return { ...limits, MAX_SUB_AGENT_DEPTH: maxSubAgentDepth, silent, interactive, roster,
+    ...(selectedPath === undefined ? {} : { rosterFile: selectedPath }) };
 }
 
 export function setRosterEnabled(

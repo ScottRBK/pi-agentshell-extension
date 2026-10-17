@@ -15,11 +15,12 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const PYTHON_PROJECT = join(ROOT, "python");
 const RUNTIME_PYTHON = join(PYTHON_PROJECT, ".venv", "bin", "python");
 
-type Scenario = "install" | "missing-uv" | "decline" | "outdated";
+type Scenario = "install" | "missing-uv" | "decline" | "outdated" | "resources-outdated";
 type NotificationType = "info" | "warning" | "error";
 
 interface CapturedTool {
   name: string;
+  execute: (...args: any[]) => Promise<any>;
 }
 
 interface ExecResult {
@@ -30,6 +31,8 @@ interface ExecResult {
 }
 
 interface SetupContext {
+  cwd: string;
+  mode: "json";
   hasUI: boolean;
   sessionManager: {
     getBranch(): [];
@@ -59,7 +62,7 @@ function result(code: number, stderr = ""): ExecResult {
   };
 }
 
-function installFakeRuntime(outdated = false): void {
+function installFakeRuntime(outdated = false, resourcesOutdated = false): void {
   const realPython = process.env.REAL_AGENT_SHELL_PYTHON;
   assert.ok(realPython, "REAL_AGENT_SHELL_PYTHON is required");
   assert.ok(!realPython.includes("'"), "test Python path cannot contain a quote");
@@ -69,9 +72,19 @@ function installFakeRuntime(outdated = false): void {
     ? "if [ \"$2\" = \"-c\" ]; then exit 1; fi\n"
     : "";
 
+  // Double only the worker process response from a runtime without the 0.5 resources API.
+  const resourceCheck = resourcesOutdated
+    ? 'if [ "$2" != "-c" ]; then\n'
+      + '  IFS= read -r request || [ -n "$request" ] || exit 1\n'
+      + '  case "$request" in *\'"resources":\'*)\n'
+      + "    printf '%s\\n' '{\"kind\":\"fatal\",\"message\":"
+      + '"Session resources require AgentShell 0.5.0; update the runtime"}\'\n'
+      + '    exit 1;; esac\n'
+      + `  printf '%s\\n' "$request" | '${realPython}' "$@"; exit $?\nfi\n`
+    : "";
   writeFileSync(
     RUNTIME_PYTHON,
-    `#!/bin/sh\n${capabilityCheck}exec '${realPython}' "$@"\n`,
+    `#!/bin/sh\n${capabilityCheck}${resourceCheck}exec '${realPython}' "$@"\n`,
     "utf8",
   );
   chmodSync(RUNTIME_PYTHON, 0o755);
@@ -83,7 +96,7 @@ export default async function setupHarness(): Promise<void> {
     scenario === "install" ||
       scenario === "missing-uv" ||
       scenario === "decline" ||
-      scenario === "outdated",
+      scenario === "outdated" || scenario === "resources-outdated",
     `unsupported setup scenario: ${scenario}`,
   );
 
@@ -124,22 +137,26 @@ export default async function setupHarness(): Promise<void> {
         "--project",
         PYTHON_PROJECT,
         "--locked",
+        "--no-build",
       ]);
       installFakeRuntime();
       return result(0);
     },
   } as unknown as ExtensionAPI;
 
-  if (scenario === "outdated") {
-    installFakeRuntime(true);
+  if (scenario === "outdated" || scenario === "resources-outdated") {
+    installFakeRuntime(scenario === "outdated", scenario === "resources-outdated");
   }
 
   await subagentsExtension(fakePi);
 
-  assert.equal(tools.length, scenario === "outdated" ? 3 : 0);
-  assert.equal(sessionStarts.length, 2);
+  assert.equal(tools.length,
+    scenario === "outdated" ? 3 : scenario === "resources-outdated" ? 4 : 0);
+  assert.equal(sessionStarts.length, scenario === "resources-outdated" ? 1 : 2);
 
   const context: SetupContext = {
+    cwd: ROOT,
+    mode: "json",
     hasUI: true,
     sessionManager: {
       getBranch: () => [],
@@ -148,7 +165,7 @@ export default async function setupHarness(): Promise<void> {
       async confirm(title, message) {
         confirmCalls += 1;
         assert.match(title, /AgentShell runtime/);
-        assert.match(message, /uv sync .* --locked/);
+        assert.match(message, /uv sync .* --locked --no-build/);
         return scenario !== "decline";
       },
       notify(message, type) {
@@ -164,7 +181,21 @@ export default async function setupHarness(): Promise<void> {
     );
   }
 
-  if (scenario === "install") {
+  if (scenario === "resources-outdated") {
+    const tool = tools.find(({ name }) => name === "subagent")!;
+    // Act / Assert: recovery is actionable but always requires the user's consent.
+    await assert.rejects(tool.execute("old-resources", { agent_type: "pi",
+      task_name: "Resource selection", prompt: "Must not launch", resources: {},
+    }, undefined, undefined, context), (error: Error) => {
+      assert.match(error.message, /AgentShell 0\.5\.0/);
+      assert.ok(error.message.includes(
+        `uv sync --project "${PYTHON_PROJECT}" --locked --no-build`), error.message);
+      assert.match(error.message, /reload/i);
+      return true;
+    });
+    assert.equal(confirmCalls, 0);
+    assert.equal(execCalls.length, 0);
+  } else if (scenario === "install") {
     assert.equal(confirmCalls, 1);
     assert.equal(execCalls.length, 2);
     assert.equal(tools.length, 4);

@@ -19,6 +19,7 @@ const scenarios = [
   ["installs the missing AgentShell runtime after confirmation", "install"],
   ["explains how to install uv when uv is missing", "missing-uv"],
   ["leaves the AgentShell runtime uninstalled when declined", "decline"],
+  ["gives a wheel-only resource-runtime update command without installing", "resources-outdated"],
   [
     "keeps subagent tools when the runtime predates model discovery",
     "outdated",
@@ -74,6 +75,8 @@ for (const [name, scenario] of scenarios) {
 
       const env = {
         ...process.env,
+        HOME: temporaryExtension,
+        XDG_STATE_HOME: join(temporaryExtension, "state"),
         PI_CODING_AGENT_DIR: join(temporaryExtension, "agent"),
         REAL_AGENT_SHELL_PYTHON: REAL_PYTHON,
         SETUP_SCENARIO: scenario,
@@ -81,6 +84,9 @@ for (const [name, scenario] of scenarios) {
       delete env.PI_AGENT_SHELL_CHILD;
       delete env.PI_AGENT_SHELL_DEPTH;
       delete env.PI_AGENT_SHELL_MAX_DEPTH;
+      delete env.PI_AGENTSHELL_ROSTER_FILE;
+      delete env.TMUX;
+      delete env.TMUX_PANE;
 
       const completed = spawnSync(
         "pi",

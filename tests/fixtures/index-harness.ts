@@ -401,7 +401,6 @@ export default async function indexHarness(): Promise<void> {
     /Do not pass `new`, a background Job ID, or a newly generated UUID/i,
   );
   assert.deepEqual(tool.parameters.required, [
-    "agent_type",
     "task_name",
     "prompt",
   ]);

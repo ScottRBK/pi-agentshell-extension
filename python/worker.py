@@ -172,6 +172,7 @@ async def main() -> int:
         disallowed_tools=disallowed_tools,
         allowed_tools=allowed_tools,
         session_id=session_id,
+        **session_resources(request),
     ):
         event_data = {
             key: value
@@ -260,6 +261,7 @@ async def run_interactive(
             effort=effort,
             session_id=session_id,
             allowed_tools=allowed_tools,
+            **session_resources(request),
         )
         return await observe_interactive(
             session,
@@ -272,6 +274,44 @@ async def run_interactive(
         if session is not None:
             with contextlib.suppress(BaseException):
                 await session.close()
+
+
+def session_resources(request: dict[str, object]) -> dict:
+    if "resources" not in request:
+        return {}
+    # Lazy import keeps ordinary calls working with a previously installed runtime.
+    try:
+        from agent_shell.models.resources import SessionResources
+    except ImportError as error:
+        raise ValueError(
+            "Session resources require AgentShell 0.5.0; update the runtime"
+        ) from error
+    value = request["resources"]
+    if not isinstance(value, dict):
+        raise ValueError("resources must be a JSON object")
+    for key, setting in value.items():
+        if key in {"packages", "mcp_servers"}:
+            if key == "mcp_servers" and setting is None:
+                continue
+            if setting != []:
+                raise ValueError(
+                    f"resources.{key} supports only []; provision local files separately"
+                )
+        elif key in {"skills", "plugins", "extensions"}:
+            if not isinstance(setting, list) or any(
+                not isinstance(path, str) or not path.strip() or "\u0000" in path
+                for path in setting
+            ):
+                raise ValueError(f"resources.{key} must be an array of local paths")
+            if any(re.match(r"^(?:[a-z]+:|~)", path, re.I) for path in setting):
+                raise ValueError(f"resources.{key} requires provisioned local paths")
+        elif key in {"inherit_personal_resources", "inherit_project_resources",
+                     "include_instruction_files", "include_home_system_prompt"}:
+            if not isinstance(setting, bool):
+                raise ValueError(f"resources.{key} must be a boolean")
+        else:
+            raise ValueError(f"Unknown resources setting {key!r}")
+    return {"resources": SessionResources(**value)}
 
 
 def parse_inactivity_timeout(value: object) -> float:
