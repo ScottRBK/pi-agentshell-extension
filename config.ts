@@ -17,10 +17,10 @@ import {
 } from "./limits.ts";
 
 const LIMIT_SETTINGS = new Set<keyof AgentShellLimits>([
-  "maxOutputBytes",
-  "maxProtocolBytes",
-  "maxMessageBytes",
-  "maxStderrBytes",
+  "max_output_bytes",
+  "max_protocol_bytes",
+  "max_message_bytes",
+  "max_stderr_bytes",
 ]);
 
 export interface AgentShellInteractiveConfig {
@@ -59,7 +59,7 @@ export interface AgentShellRosterConfig {
 }
 
 export interface AgentShellConfig extends AgentShellLimits {
-  MAX_SUB_AGENT_DEPTH: number;
+  max_sub_agent_depth: number;
   silent: boolean;
   interactive: AgentShellInteractiveConfig;
   roster: AgentShellRosterConfig;
@@ -91,10 +91,10 @@ export function loadAgentShellLimits(
   const config = loadAgentShellConfig(agentDirectory);
 
   return {
-    maxOutputBytes: config.maxOutputBytes,
-    maxProtocolBytes: config.maxProtocolBytes,
-    maxMessageBytes: config.maxMessageBytes,
-    maxStderrBytes: config.maxStderrBytes,
+    max_output_bytes: config.max_output_bytes,
+    max_protocol_bytes: config.max_protocol_bytes,
+    max_message_bytes: config.max_message_bytes,
+    max_stderr_bytes: config.max_stderr_bytes,
   };
 }
 
@@ -272,13 +272,13 @@ export function loadAgentShellConfig(
     : loadAgentShellRosterFile(selectedPath);
 
   for (const [setting, value] of Object.entries(overrides)) {
-    if (setting === "MAX_SUB_AGENT_DEPTH") {
+    if (setting === "max_sub_agent_depth") {
       // Descendants use their root's policy, not a later or different local setting.
       if (inheritedMaxDepth !== undefined) continue;
       if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
         throw invalidConfiguration(
           configPath,
-          "MAX_SUB_AGENT_DEPTH must be a nonnegative safe integer",
+          "max_sub_agent_depth must be a nonnegative safe integer",
         );
       }
       maxSubAgentDepth = value;
@@ -380,18 +380,18 @@ export function loadAgentShellConfig(
   }
 
   for (const setting of [
-    "maxOutputBytes",
-    "maxMessageBytes",
+    "max_output_bytes",
+    "max_message_bytes",
   ] as const) {
-    if (limits[setting] > limits.maxProtocolBytes) {
+    if (limits[setting] > limits.max_protocol_bytes) {
       throw invalidConfiguration(
         configPath,
-        `${setting} cannot exceed maxProtocolBytes`,
+        `${setting} cannot exceed max_protocol_bytes`,
       );
     }
   }
 
-  return { ...limits, MAX_SUB_AGENT_DEPTH: maxSubAgentDepth, silent, interactive, roster,
+  return { ...limits, max_sub_agent_depth: maxSubAgentDepth, silent, interactive, roster,
     ...(selectedPath === undefined ? {} : { rosterFile: selectedPath }) };
 }
 

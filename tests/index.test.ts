@@ -320,7 +320,7 @@ test("applies user-configured AgentShell limits", {
     mkdirSync(extensionDirectory);
     writeFileSync(
       join(extensionDirectory, "agentshell.json"),
-      JSON.stringify({ maxOutputBytes: 5 }),
+      JSON.stringify({ max_output_bytes: 5 }),
       "utf8",
     );
 

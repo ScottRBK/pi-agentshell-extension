@@ -343,12 +343,12 @@ provide configuration continuity, not live-job or crash recovery. See the
 ### Nested Delegation
 
 By default, your root Pi session can delegate tasks, but its children cannot use this extension.
-To allow children to delegate too, set the literal `MAX_SUB_AGENT_DEPTH` key in
+To allow children to delegate too, set `max_sub_agent_depth` in
 `~/.pi/agent/extensions/agentshell.json` (or under your custom Pi agent directory):
 
 ```json
 {
-  "MAX_SUB_AGENT_DEPTH": 1
+  "max_sub_agent_depth": 1
 }
 ```
 
@@ -379,33 +379,35 @@ The extension stops a subagent if any of these limits are exceeded:
 
 | Setting | Default | What it limits |
 | --- | ---: | --- |
-| `maxOutputBytes` | 64 KiB | Text returned to Pi and each job's live activity tail. |
-| `maxProtocolBytes` | 2 MiB | Total data sent by the AgentShell worker. |
-| `maxMessageBytes` | 256 KiB | One message sent by the AgentShell worker. |
-| `maxStderrBytes` | 256 KiB | Diagnostic output from the AgentShell worker. |
+| `max_output_bytes` | 64 KiB | Text returned to Pi and each job's live activity tail. |
+| `max_protocol_bytes` | 2 MiB | Total data sent by the AgentShell worker. |
+| `max_message_bytes` | 256 KiB | One message sent by the AgentShell worker. |
+| `max_stderr_bytes` | 256 KiB | Diagnostic output from the AgentShell worker. |
 
 When subagent text output exceeds its limit, the failed completion message includes a UTF-8-safe
-truncated prefix. A model list that exceeds `maxOutputBytes` is not returned.
+truncated prefix. A model list that exceeds `max_output_bytes` is not returned.
 
 To override the defaults, create `~/.pi/agent/extensions/agentshell.json`:
 
 ```json
 {
-  "maxOutputBytes": 131072,
-  "maxProtocolBytes": 4194304,
-  "maxMessageBytes": 524288,
-  "maxStderrBytes": 524288
+  "max_output_bytes": 131072,
+  "max_protocol_bytes": 4194304,
+  "max_message_bytes": 524288,
+  "max_stderr_bytes": 524288
 }
 ```
 
-Overrides may be partial. Values are positive whole numbers in bytes. `maxOutputBytes` and
-`maxMessageBytes` cannot exceed `maxProtocolBytes`. Run `/reload` after changing the file.
+All `agentshell.json` keys use snake_case, including nested settings.
+
+Overrides may be partial. Values are positive whole numbers in bytes. `max_output_bytes` and
+`max_message_bytes` cannot exceed `max_protocol_bytes`. Run `/reload` after changing the file.
 
 ## Safety and Limitations
 
 - Child processes run with the user's permissions
 - Approval bypass is disabled by default
-- Nested extension delegation is disabled by default; `MAX_SUB_AGENT_DEPTH` can enable it
+- Nested extension delegation is disabled by default; `max_sub_agent_depth` can enable it
 - Active jobs are cancelled when their owning Pi session shuts down
 - Stopping a parent turn does not stop background jobs; use `/agentshell-cancel` when needed
 

@@ -45,7 +45,7 @@ test("uses default limits when no config file exists", () => {
     );
     assert.deepEqual(loadAgentShellConfig(agentDirectory), {
       ...DEFAULT_AGENT_SHELL_LIMITS,
-      MAX_SUB_AGENT_DEPTH: 0,
+      max_sub_agent_depth: 0,
       silent: false,
       interactive: DEFAULT_AGENT_SHELL_INTERACTIVE_CONFIG,
       roster: DEFAULT_AGENT_SHELL_ROSTER_CONFIG,
@@ -61,11 +61,11 @@ test("loads partial limit overrides from the AgentShell config file", () => {
   );
 
   try {
-    writeConfig(agentDirectory, { maxOutputBytes: 128 * 1024 });
+    writeConfig(agentDirectory, { max_output_bytes: 128 * 1024 });
 
     assert.deepEqual(loadAgentShellLimits(agentDirectory), {
       ...DEFAULT_AGENT_SHELL_LIMITS,
-      maxOutputBytes: 128 * 1024,
+      max_output_bytes: 128 * 1024,
     });
   } finally {
     rmSync(agentDirectory, { recursive: true, force: true });
@@ -80,7 +80,7 @@ test("loads interactive defaults and nested overrides with existing limits", () 
 
   try {
     writeConfig(agentDirectory, {
-      maxOutputBytes: 128 * 1024,
+      max_output_bytes: 128 * 1024,
       interactive: {
         enabled: true,
         stay_open: true,
@@ -95,8 +95,8 @@ test("loads interactive defaults and nested overrides with existing limits", () 
     // Assert
     assert.deepEqual(config, {
       ...DEFAULT_AGENT_SHELL_LIMITS,
-      MAX_SUB_AGENT_DEPTH: 0,
-      maxOutputBytes: 128 * 1024,
+      max_sub_agent_depth: 0,
+      max_output_bytes: 128 * 1024,
       silent: false,
       interactive: {
         enabled: true,
@@ -108,39 +108,39 @@ test("loads interactive defaults and nested overrides with existing limits", () 
     });
     assert.deepEqual(loadAgentShellLimits(agentDirectory), {
       ...DEFAULT_AGENT_SHELL_LIMITS,
-      maxOutputBytes: 128 * 1024,
+      max_output_bytes: 128 * 1024,
     });
   } finally {
     rmSync(agentDirectory, { recursive: true, force: true });
   }
 });
 
-test("loads only nonnegative safe integer MAX_SUB_AGENT_DEPTH values", () => {
+test("loads only nonnegative safe integer max_sub_agent_depth values", () => {
   for (const depth of [0, 1, 2, Number.MAX_SAFE_INTEGER]) {
     // Arrange
     const directory = mkdtempSync(join(tmpdir(), "pi-agentshell-depth-"));
     try {
-      writeConfig(directory, { MAX_SUB_AGENT_DEPTH: depth });
+      writeConfig(directory, { max_sub_agent_depth: depth });
 
       // Act / Assert
-      assert.equal(loadAgentShellConfig(directory).MAX_SUB_AGENT_DEPTH, depth);
+      assert.equal(loadAgentShellConfig(directory).max_sub_agent_depth, depth);
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
   }
 });
 
-test("rejects invalid explicit MAX_SUB_AGENT_DEPTH values with the config path", () => {
+test("rejects invalid explicit max_sub_agent_depth values with the config path", () => {
   for (const depth of [-1, 0.5, "1", null, true, false, [], {}, Number.MAX_SAFE_INTEGER + 1]) {
     // Arrange
     const directory = mkdtempSync(join(tmpdir(), "pi-agentshell-depth-"));
     try {
-      const path = writeConfig(directory, { MAX_SUB_AGENT_DEPTH: depth });
+      const path = writeConfig(directory, { max_sub_agent_depth: depth });
 
       // Act / Assert
       assert.throws(() => loadAgentShellConfig(directory), {
         message: `Invalid AgentShell configuration at ${path}: ` +
-          "MAX_SUB_AGENT_DEPTH must be a nonnegative safe integer",
+          "max_sub_agent_depth must be a nonnegative safe integer",
       });
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -153,14 +153,14 @@ test("loads either global silent default alongside existing settings", () => {
     // Arrange
     const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-silent-config-"));
     try {
-      writeConfig(agentDirectory, { silent, maxOutputBytes: 128 * 1024 });
+      writeConfig(agentDirectory, { silent, max_output_bytes: 128 * 1024 });
 
       // Act
       const config = loadAgentShellConfig(agentDirectory);
 
       // Assert
       assert.equal(config.silent, silent);
-      assert.equal(config.maxOutputBytes, 128 * 1024);
+      assert.equal(config.max_output_bytes, 128 * 1024);
     } finally {
       rmSync(agentDirectory, { recursive: true, force: true });
     }
@@ -186,8 +186,13 @@ test("persists the global roster switch without changing other settings", () => 
   const agentDirectory = mkdtempSync(join(tmpdir(), "pi-agentshell-roster-"));
 
   try {
+    // Arrange
     const configPath = writeConfig(agentDirectory, {
-      maxOutputBytes: 128 * 1024,
+      max_sub_agent_depth: 2,
+      max_output_bytes: 128 * 1024,
+      max_protocol_bytes: 4 * 1024 * 1024,
+      max_message_bytes: 512 * 1024,
+      max_stderr_bytes: 512 * 1024,
       roster: {
         roles: [{
           name: "reviewer",
@@ -199,10 +204,16 @@ test("persists the global roster switch without changing other settings", () => 
       },
     });
 
+    // Act
     setRosterEnabled(agentDirectory, true);
 
+    // Assert
     assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), {
-      maxOutputBytes: 128 * 1024,
+      max_sub_agent_depth: 2,
+      max_output_bytes: 128 * 1024,
+      max_protocol_bytes: 4 * 1024 * 1024,
+      max_message_bytes: 512 * 1024,
+      max_stderr_bytes: 512 * 1024,
       roster: {
         roles: [{
           name: "reviewer",
@@ -213,6 +224,13 @@ test("persists the global roster switch without changing other settings", () => 
         }],
         enabled: true,
       },
+    });
+    assert.equal(loadAgentShellConfig(agentDirectory).max_sub_agent_depth, 2);
+    assert.deepEqual(loadAgentShellLimits(agentDirectory), {
+      max_output_bytes: 128 * 1024,
+      max_protocol_bytes: 4 * 1024 * 1024,
+      max_message_bytes: 512 * 1024,
+      max_stderr_bytes: 512 * 1024,
     });
   } finally {
     rmSync(agentDirectory, { recursive: true, force: true });
@@ -366,7 +384,7 @@ test("requires positive safe-integer limit values", () => {
 
   try {
     const configPath = writeConfig(agentDirectory, {
-      maxOutputBytes: 0,
+      max_output_bytes: 0,
     });
 
     assert.throws(
@@ -374,7 +392,7 @@ test("requires positive safe-integer limit values", () => {
       {
         message:
           `Invalid AgentShell configuration at ${configPath}: ` +
-          "maxOutputBytes must be a positive safe integer",
+          "max_output_bytes must be a positive safe integer",
       },
     );
   } finally {
@@ -386,19 +404,19 @@ test("requires content limits not to exceed the protocol limit", () => {
   const cases = [
     {
       overrides: {
-        maxOutputBytes: 201,
-        maxProtocolBytes: 200,
-        maxMessageBytes: 100,
+        max_output_bytes: 201,
+        max_protocol_bytes: 200,
+        max_message_bytes: 100,
       },
-      setting: "maxOutputBytes",
+      setting: "max_output_bytes",
     },
     {
       overrides: {
-        maxOutputBytes: 100,
-        maxProtocolBytes: 200,
-        maxMessageBytes: 201,
+        max_output_bytes: 100,
+        max_protocol_bytes: 200,
+        max_message_bytes: 201,
       },
-      setting: "maxMessageBytes",
+      setting: "max_message_bytes",
     },
   ];
 
@@ -415,7 +433,7 @@ test("requires content limits not to exceed the protocol limit", () => {
         {
           message:
             `Invalid AgentShell configuration at ${configPath}: ` +
-            `${setting} cannot exceed maxProtocolBytes`,
+            `${setting} cannot exceed max_protocol_bytes`,
         },
       );
     } finally {
@@ -468,3 +486,49 @@ test("reports malformed AgentShell limit configuration", () => {
     rmSync(agentDirectory, { recursive: true, force: true });
   }
 });
+
+for (const setting of ["MAX_SUB_AGENT_DEPTH", "MAX_SUBAGENT_DEPTH", "maxSubAgentDepth"]) {
+  test(`rejects obsolete or differently cased depth setting ${setting}`, () => {
+    // Arrange
+    const directory = mkdtempSync(join(tmpdir(), "pi-agentshell-depth-casing-"));
+    try {
+      const configPath = writeConfig(directory, { [setting]: 1 });
+
+      // Act / Assert: inherited policy must not silently accept an obsolete key either.
+      for (const inheritedDepth of [undefined, 2]) {
+        assert.throws(() => loadAgentShellConfig(directory, inheritedDepth), {
+          message: `Invalid AgentShell configuration at ${configPath}: ` +
+            `unknown setting "${setting}"`,
+        });
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const [setting, obsolete] of [
+  ["max_output_bytes", "maxOutputBytes"],
+  ["max_protocol_bytes", "maxProtocolBytes"],
+  ["max_message_bytes", "maxMessageBytes"],
+  ["max_stderr_bytes", "maxStderrBytes"],
+] as const) {
+  test(`loads snake_case ${setting} and rejects obsolete ${obsolete}`, () => {
+    // Arrange
+    const directory = mkdtempSync(join(tmpdir(), "pi-agentshell-limit-casing-"));
+    try {
+      // Act / Assert: override each limit independently with a valid value.
+      const value = setting === "max_protocol_bytes" ? 4 * 1024 * 1024 : 1024;
+      const configPath = writeConfig(directory, { [setting]: value });
+      assert.equal(loadAgentShellLimits(directory)[setting], value);
+
+      writeFileSync(configPath, JSON.stringify({ [setting]: value, [obsolete]: value }));
+      assert.throws(() => loadAgentShellConfig(directory), {
+        message: `Invalid AgentShell configuration at ${configPath}: ` +
+          `unknown setting "${obsolete}"`,
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+}

@@ -1240,10 +1240,10 @@ export default async function subagentsExtension(
     ? undefined : inheritedDelegation.maxDepth;
   const config = loadAgentShellConfig(agentDirectory, inheritedMaxDepth);
   const delegation = inheritedDelegation === "root"
-    ? Object.freeze({ depth: 0, maxDepth: config.MAX_SUB_AGENT_DEPTH })
+    ? Object.freeze({ depth: 0, maxDepth: config.max_sub_agent_depth })
     : inheritedDelegation;
   const limits: AgentShellLimits = config;
-  const jobs = new JobRegistry(limits.maxOutputBytes);
+  const jobs = new JobRegistry(limits.max_output_bytes);
   const savedLaunches = new Map<string, SavedLaunch>();
   const retainedLaunches = new Set<string>();
   const rosterSource = config.rosterFile ?? join(agentDirectory, "extensions", "agentshell.json");

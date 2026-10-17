@@ -294,7 +294,7 @@ function formatOutputLimitFailure(
 ): string {
   const reason = formatLimitFailure(
     "output",
-    "maxOutputBytes",
+    "max_output_bytes",
     maxOutputBytes,
   );
 
@@ -305,7 +305,7 @@ function formatModelListLimitFailure(maxOutputBytes: number): string {
   return [
     `AgentShell model list output exceeded the ${maxOutputBytes} byte limit. ` +
       "The model list was not returned.",
-    "Increase maxOutputBytes in your AgentShell extension " +
+    "Increase max_output_bytes in your AgentShell extension " +
       "configuration to override it.",
   ].join("\n");
 }
@@ -515,12 +515,12 @@ async function invokeWorker(
 
       if (
         pendingLineBytes + segment.length >
-          limits.maxMessageBytes
+          limits.max_message_bytes
       ) {
         stopWorker(new Error(formatLimitFailure(
           "protocol message",
-          "maxMessageBytes",
-          limits.maxMessageBytes,
+          "max_message_bytes",
+          limits.max_message_bytes,
         )));
         return;
       }
@@ -544,7 +544,7 @@ async function invokeWorker(
       return;
     }
 
-    const remainingBytes = limits.maxProtocolBytes - protocolBytes;
+    const remainingBytes = limits.max_protocol_bytes - protocolBytes;
     const acceptedBytes = Math.min(chunk.length, remainingBytes);
 
     if (acceptedBytes > 0) {
@@ -557,8 +557,8 @@ async function invokeWorker(
     if (!hasLineError && acceptedBytes < chunk.length) {
       stopWorker(new Error(formatLimitFailure(
         "protocol",
-        "maxProtocolBytes",
-        limits.maxProtocolBytes,
+        "max_protocol_bytes",
+        limits.max_protocol_bytes,
       )));
     }
   });
@@ -574,7 +574,7 @@ async function invokeWorker(
       return;
     }
 
-    const remainingBytes = limits.maxStderrBytes - stderrBytes;
+    const remainingBytes = limits.max_stderr_bytes - stderrBytes;
     const acceptedBytes = Math.min(chunk.length, remainingBytes);
 
     if (acceptedBytes > 0) {
@@ -585,8 +585,8 @@ async function invokeWorker(
     if (acceptedBytes < chunk.length) {
       stopWorker(new Error(formatLimitFailure(
         "stderr",
-        "maxStderrBytes",
-        limits.maxStderrBytes,
+        "max_stderr_bytes",
+        limits.max_stderr_bytes,
       )));
     }
   });
@@ -782,8 +782,8 @@ export async function getAgentShellModels(
     throw new Error("AgentShell worker returned invalid models");
   }
 
-  if (Buffer.byteLength(JSON.stringify(models)) > limits.maxOutputBytes) {
-    throw new Error(formatModelListLimitFailure(limits.maxOutputBytes));
+  if (Buffer.byteLength(JSON.stringify(models)) > limits.max_output_bytes) {
+    throw new Error(formatModelListLimitFailure(limits.max_output_bytes));
   }
 
   return models;
@@ -917,11 +917,11 @@ export async function runAgentShell(
         ? `${output.join("\n")}\n${event.content}`
         : event.content;
 
-      if (Buffer.byteLength(nextOutput) > limits.maxOutputBytes) {
+      if (Buffer.byteLength(nextOutput) > limits.max_output_bytes) {
         output.length = 0;
-        output.push(takeUtf8Prefix(nextOutput, limits.maxOutputBytes));
+        output.push(takeUtf8Prefix(nextOutput, limits.max_output_bytes));
         throw new Error(
-          formatOutputLimitFailure(limits.maxOutputBytes, output),
+          formatOutputLimitFailure(limits.max_output_bytes, output),
         );
       }
 

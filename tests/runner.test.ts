@@ -28,10 +28,10 @@ const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const PYTHON_DIR = join(ROOT, "python");
 const FAKE_BIN = join(PYTHON_DIR, "tests", "fixtures", "bin");
 const GENEROUS_LIMITS = {
-    maxOutputBytes: 1024 * 1024,
-    maxProtocolBytes: 2 * 1024 * 1024,
-    maxMessageBytes: 1024 * 1024,
-    maxStderrBytes: 1024 * 1024,
+    max_output_bytes: 1024 * 1024,
+    max_protocol_bytes: 2 * 1024 * 1024,
+    max_message_bytes: 1024 * 1024,
+    max_stderr_bytes: 1024 * 1024,
 };
 
 async function waitForFile(path: string): Promise<void> {
@@ -298,13 +298,13 @@ test("limits model-list output returned to Pi", async () => {
                 "codex",
                 PYTHON_DIR,
                 undefined,
-                { ...GENEROUS_LIMITS, maxOutputBytes: 5 },
+                { ...GENEROUS_LIMITS, max_output_bytes: 5 },
             ),
             {
                 message: [
                     "AgentShell model list output exceeded the 5 byte limit. " +
                         "The model list was not returned.",
-                    "Increase maxOutputBytes in your AgentShell extension " +
+                    "Increase max_output_bytes in your AgentShell extension " +
                         "configuration to override it.",
                 ].join("\n"),
             },
@@ -503,14 +503,14 @@ test("stops and reports truncated output at the output limit", {
                 undefined,
                 {
                     ...GENEROUS_LIMITS,
-                    maxOutputBytes: 5,
+                    max_output_bytes: 5,
                 },
             ),
             {
                 message: [
                     "AgentShell output exceeded the 5 byte limit. " +
                         "The agent was stopped.",
-                    "Increase maxOutputBytes in your AgentShell extension " +
+                    "Increase max_output_bytes in your AgentShell extension " +
                         "configuration to override it.",
                     "",
                     "Partial output (truncated):",
@@ -551,15 +551,15 @@ test("stops when worker protocol exceeds the total limit", {
                 undefined,
                 {
                     ...GENEROUS_LIMITS,
-                    maxProtocolBytes: 200,
-                    maxMessageBytes: 150,
+                    max_protocol_bytes: 200,
+                    max_message_bytes: 150,
                 },
             ),
             {
                 message: [
                     "AgentShell protocol exceeded the 200 byte limit. " +
                         "The agent was stopped.",
-                    "Increase maxProtocolBytes in your AgentShell extension " +
+                    "Increase max_protocol_bytes in your AgentShell extension " +
                         "configuration to override it.",
                 ].join("\n"),
             },
@@ -591,14 +591,14 @@ test("stops when one worker message exceeds its limit", {
                 undefined,
                 {
                     ...GENEROUS_LIMITS,
-                    maxMessageBytes: 100,
+                    max_message_bytes: 100,
                 },
             ),
             {
                 message: [
                     "AgentShell protocol message exceeded the 100 byte limit. " +
                         "The agent was stopped.",
-                    "Increase maxMessageBytes in your AgentShell extension " +
+                    "Increase max_message_bytes in your AgentShell extension " +
                         "configuration to override it.",
                 ].join("\n"),
             },
@@ -659,14 +659,14 @@ test("stops when worker stderr exceeds its limit", {
                 undefined,
                 {
                     ...GENEROUS_LIMITS,
-                    maxStderrBytes: 5,
+                    max_stderr_bytes: 5,
                 },
             ),
             {
                 message: [
                     "AgentShell stderr exceeded the 5 byte limit. " +
                         "The agent was stopped.",
-                    "Increase maxStderrBytes in your AgentShell extension " +
+                    "Increase max_stderr_bytes in your AgentShell extension " +
                         "configuration to override it.",
                 ].join("\n"),
             },

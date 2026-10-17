@@ -60,7 +60,7 @@ Mixed-harness rosters without that Pi-only field remain supported.
 
 Without the environment override, the roster continues to come from
 `<Pi agent directory>/extensions/agentshell.json`. That file also owns limits, silent mode,
-interactive defaults, and the root's `MAX_SUB_AGENT_DEPTH`. A selected roster cannot change them.
+interactive defaults, and the root's `max_sub_agent_depth`. A selected roster cannot change them.
 
 ## Calling the existing tool
 

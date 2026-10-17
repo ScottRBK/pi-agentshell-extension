@@ -16,8 +16,8 @@ test("a session file replaces only the roster without changing home or environme
   try {
     mkdirSync(join(root, "extensions"));
     const globalPath = join(root, "extensions/agentshell.json");
-    const globalText = JSON.stringify({ maxOutputBytes: 1234, silent: true,
-      MAX_SUB_AGENT_DEPTH: 2, roster: { enabled: false, roles: [] } });
+    const globalText = JSON.stringify({ max_output_bytes: 1234, silent: true,
+      max_sub_agent_depth: 2, roster: { enabled: false, roles: [] } });
     writeFileSync(globalPath, globalText);
     const selected = join(root, "roster.json");
     writeFileSync(selected, JSON.stringify({ roster: { enabled: true, roles: [reviewer] } }));
@@ -29,9 +29,9 @@ test("a session file replaces only the roster without changing home or environme
 
     // Assert
     assert.deepEqual(config.roster, { enabled: true, roles: [reviewer] });
-    assert.equal(config.maxOutputBytes, 1234);
+    assert.equal(config.max_output_bytes, 1234);
     assert.equal(config.silent, true);
-    assert.equal(config.MAX_SUB_AGENT_DEPTH, 2);
+    assert.equal(config.max_sub_agent_depth, 2);
     assert.equal(readFileSync(globalPath, "utf8"), globalText);
     assert.deepEqual({ ...process.env }, environment);
   } finally {
@@ -52,7 +52,7 @@ test("invalid explicit rosters fail closed rather than using the personal roster
       ["{", /valid JSON/],
       ["[]", /JSON object/],
       ["{}", /roster/],
-      ['{"roster":{},"MAX_SUB_AGENT_DEPTH":99}', /only.*roster/],
+      ['{"roster":{},"max_sub_agent_depth":99}', /only.*roster/],
       [JSON.stringify({ roster: { roles: [reviewer, reviewer] } }), /duplicate/],
       [JSON.stringify({ roster: { enabled: "true" } }), /boolean/],
     ] as const;

@@ -171,9 +171,9 @@ export default async function delegationHarness(): Promise<void> {
       for (const max of [0, 1, 2]) {
         // Arrange: each extension instance captures its root setting at startup.
         markers();
-        writeFileSync(configPath, JSON.stringify(max === 0 ? {} : { MAX_SUB_AGENT_DEPTH: max }));
+        writeFileSync(configPath, JSON.stringify(max === 0 ? {} : { max_sub_agent_depth: max }));
         const root = await loadExtension();
-        writeFileSync(configPath, JSON.stringify({ MAX_SUB_AGENT_DEPTH: 99 }));
+        writeFileSync(configPath, JSON.stringify({ max_sub_agent_depth: 99 }));
         const environment = { ...process.env };
 
         // Act: concurrent mixed targets must get the same root snapshot.
@@ -190,7 +190,7 @@ export default async function delegationHarness(): Promise<void> {
         if (max > 0) {
           // The child's local depth setting is irrelevant, even if no longer valid.
           markers("1", "1", String(max));
-          writeFileSync(configPath, '{"MAX_SUB_AGENT_DEPTH":null}');
+          writeFileSync(configPath, '{"max_sub_agent_depth":null}');
           const child = await loadExtension();
           const notices: string[] = [];
           await child.commands.get("agentshell-roster")!.handler("", {
@@ -235,7 +235,7 @@ export default async function delegationHarness(): Promise<void> {
     // Arrange: depth zero is the root, so it can always launch direct tasks.
     for (const max of [0, 1, 2]) {
       markers();
-      writeFileSync(configPath, JSON.stringify({ MAX_SUB_AGENT_DEPTH: max }));
+      writeFileSync(configPath, JSON.stringify({ max_sub_agent_depth: max }));
       const root = await loadExtension();
       assert.ok(root.tools.has("subagent"));
 

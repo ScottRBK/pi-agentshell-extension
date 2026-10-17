@@ -61,7 +61,7 @@ export default async function rosterLaunchHarness(): Promise<void> {
     const fakePi = join(root, "bin/pi");
     copyFileSync(fileURLToPath(new URL("roster-agent.py", import.meta.url)), fakePi);
     chmodSync(fakePi, 0o755);
-    writeFileSync(globalPath, '{"MAX_SUB_AGENT_DEPTH":2}');
+    writeFileSync(globalPath, '{"max_sub_agent_depth":2}');
     writeFileSync(rosterPath, JSON.stringify({ roster: { enabled: true, roles: [role] } }));
     process.env.PATH = join(root, "bin");
     process.env.PI_AGENTSHELL_ROSTER_FILE = rosterPath;
@@ -119,7 +119,7 @@ export default async function rosterLaunchHarness(): Promise<void> {
       process.env.PI_AGENT_SHELL_CHILD = "1";
       process.env.PI_AGENT_SHELL_DEPTH = "1";
       process.env.PI_AGENT_SHELL_MAX_DEPTH = "1";
-      writeFileSync(globalPath, '{"MAX_SUB_AGENT_DEPTH":99}');
+      writeFileSync(globalPath, '{"max_sub_agent_depth":99}');
       const { tools, commands } = await load();
       const environment = { ...process.env };
       const selectedText = readFileSync(rosterPath, "utf8");
@@ -139,7 +139,7 @@ export default async function rosterLaunchHarness(): Promise<void> {
         assert.equal(report(result).maxDepth, "1");
       }
       assert.deepEqual({ ...process.env }, environment);
-      assert.equal(readFileSync(globalPath, "utf8"), '{"MAX_SUB_AGENT_DEPTH":99}');
+      assert.equal(readFileSync(globalPath, "utf8"), '{"max_sub_agent_depth":99}');
       assert.equal(readFileSync(rosterPath, "utf8"), selectedText);
       await assert.rejects(launch(tools, { roster_entry: "owner" }), /disabled/);
       process.env.PI_AGENT_SHELL_DEPTH = "2";
@@ -650,7 +650,7 @@ export default async function rosterLaunchHarness(): Promise<void> {
       await assert.rejects(launch(tools, params), /Unknown roster entry|conflict/i);
       assert.equal(existsSync(started), false);
     }
-    assert.equal(readFileSync(globalPath, "utf8"), '{"MAX_SUB_AGENT_DEPTH":2}');
+    assert.equal(readFileSync(globalPath, "utf8"), '{"max_sub_agent_depth":2}');
     process.stderr.write("ROSTER_LAUNCH_OK\n");
   } finally {
     await closeAgentShellWorkers();
