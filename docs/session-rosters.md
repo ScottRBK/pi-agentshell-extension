@@ -134,7 +134,7 @@ adequate depth at the root. Neither setting restricts native Bash or manual CLI 
 
 ## Resource choices and limits
 
-The worker pins AgentShell 0.5.0; see the [supply-chain audit](agentshell-0.5-audit.md).
+The worker pins AgentShell 0.5.0.
 Existing installations must update the extension's own worker, not an outer launcher's environment.
 Follow the setup command reported by the extension, then reload Pi. It uses
 `uv sync --project "<extension>/python" --locked --no-build` to install the audited wheel, not build

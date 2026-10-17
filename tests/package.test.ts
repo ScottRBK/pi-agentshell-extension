@@ -16,7 +16,6 @@ const EXPECTED_PACKAGE_FILES = [
   "LICENSE",
   "README.md",
   "config.ts",
-  "docs/agentshell-0.5-audit.md",
   "docs/assets/architecture.png",
   "docs/session-rosters.md",
   "extensions/agentshell.ts",

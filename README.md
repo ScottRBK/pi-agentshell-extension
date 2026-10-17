@@ -297,7 +297,7 @@ Reload restores the file's `enabled` value. Without an override, existing defaul
 
 See [session rosters](docs/session-rosters.md) for the complete resource shape, path rules,
 child environment handling, resume guarantees, and external-launcher requirements. Run `/reload`
-after editing a roster. See also the [worker dependency audit](docs/agentshell-0.5-audit.md).
+after editing a roster.
 
 ### Resuming a Subagent
 
