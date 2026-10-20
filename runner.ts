@@ -796,13 +796,11 @@ export async function runAgentShell(
   limits: AgentShellLimits = DEFAULT_AGENT_SHELL_LIMITS,
   delegation?: AgentShellDelegation,
 ): Promise<RunResult> {
-  if (hasInteractiveRequest(request)) {
-    if (
-      !isNonEmptyString(process.env.TMUX) ||
-      !isNonEmptyString(process.env.TMUX_PANE)
-    ) {
-      throw interactiveEnvironmentError();
-    }
+  if (
+    hasInteractiveRequest(request) &&
+    (!isNonEmptyString(process.env.TMUX) || !isNonEmptyString(process.env.TMUX_PANE))
+  ) {
+    throw interactiveEnvironmentError();
   }
 
   const output: string[] = [];
@@ -827,68 +825,46 @@ export async function runAgentShell(
 
   let completionMarkerSeen = false;
 
-  const handleLine = (line: string): boolean | void => {
-    if (!line.trim()) {
-      return;
-    }
-
-    const message = JSON.parse(line) as WorkerMessage;
-
-    if (message.kind === "warning") {
-      if (!isNonEmptyString(message.message)) {
-        throw new Error("AgentShell worker emitted an invalid warning");
-      }
-
-      warnings.push(message.message);
-      emitUpdate({ type: "warning", content: message.message });
-      return;
-    }
-
-    if (message.kind === "complete") {
-      if (!hasInteractiveRequest(request)) {
-        throw new Error(
-          "AgentShell worker emitted an interactive completion for a " +
-            "headless request",
-        );
-      }
-
-      if (completionMarkerSeen) {
-        throw new Error(
-          "AgentShell worker emitted duplicate interactive completion markers",
-        );
-      }
-
-      completionMarkerSeen = true;
-
-      if (status === undefined) {
-        throw new Error(
-          "AgentShell worker emitted an interactive completion before " +
-            "a terminal result",
-        );
-      }
-
-      return true;
-    }
-
-    if (message.kind === "fatal") {
-      if (!isNonEmptyString(message.message)) {
-        throw new Error("AgentShell worker emitted an invalid fatal message");
-      }
-
-      const guidance = message.message.startsWith("Session resources require AgentShell 0.5.0")
-        ? `\nRun: ${agentShellSetupCommand()}\nThen restart Pi or run /reload.` : "";
-      failureReasons.push(message.message + guidance);
-      return;
-    }
-
-    if (message.kind !== "event" || message.event === undefined) {
+  const handleCompletion = (): true => {
+    if (!hasInteractiveRequest(request)) {
       throw new Error(
-        `AgentShell worker emitted unsupported message: ${message.kind}`,
+        "AgentShell worker emitted an interactive completion for a " +
+          "headless request",
       );
     }
 
-    const event = message.event;
+    if (completionMarkerSeen) {
+      throw new Error(
+        "AgentShell worker emitted duplicate interactive completion markers",
+      );
+    }
 
+    completionMarkerSeen = true;
+
+    if (status === undefined) {
+      throw new Error(
+        "AgentShell worker emitted an interactive completion before " +
+          "a terminal result",
+      );
+    }
+
+    return true;
+  };
+
+  const handleResult = (event: AgentEvent): void => {
+    status = event.content === "ok" ? "ok" : "error";
+    outputTokens = event.output_tokens ?? 0;
+
+    if (status === "error" && failureReasons.length === 0) {
+      failureReasons.push(
+        isNonEmptyString(event.error)
+          ? event.error
+          : `${request.agent_type} reported an unsuccessful result`,
+      );
+    }
+  };
+
+  const handleEvent = (event: AgentEvent): void => {
     if (event.session_id) {
       sessionId = event.session_id;
     }
@@ -900,16 +876,7 @@ export async function runAgentShell(
     }
 
     if (event.type === "result") {
-      status = event.content === "ok" ? "ok" : "error";
-      outputTokens = event.output_tokens ?? 0;
-
-      if (status === "error" && failureReasons.length === 0) {
-        failureReasons.push(
-          isNonEmptyString(event.error)
-            ? event.error
-            : `${request.agent_type} reported an unsuccessful result`,
-        );
-      }
+      handleResult(event);
     }
 
     if (event.type === "text") {
@@ -932,6 +899,47 @@ export async function runAgentShell(
     if (event.type === "tool_use" && isNonEmptyString(event.content)) {
       emitUpdate({ type: "tool_use", content: event.content });
     }
+  };
+
+  const handleLine = (line: string): boolean | void => {
+    if (!line.trim()) {
+      return;
+    }
+
+    const message = JSON.parse(line) as WorkerMessage;
+
+    if (message.kind === "warning") {
+      if (!isNonEmptyString(message.message)) {
+        throw new Error("AgentShell worker emitted an invalid warning");
+      }
+
+      warnings.push(message.message);
+      emitUpdate({ type: "warning", content: message.message });
+      return;
+    }
+
+    if (message.kind === "complete") {
+      return handleCompletion();
+    }
+
+    if (message.kind === "fatal") {
+      if (!isNonEmptyString(message.message)) {
+        throw new Error("AgentShell worker emitted an invalid fatal message");
+      }
+
+      const guidance = message.message.startsWith("Session resources require AgentShell 0.5.0")
+        ? `\nRun: ${agentShellSetupCommand()}\nThen restart Pi or run /reload.` : "";
+      failureReasons.push(message.message + guidance);
+      return;
+    }
+
+    if (message.kind !== "event" || message.event === undefined) {
+      throw new Error(
+        `AgentShell worker emitted unsupported message: ${message.kind}`,
+      );
+    }
+
+    handleEvent(message.event);
   };
 
   const { exitCode, stderr } = await invokeWorker(
