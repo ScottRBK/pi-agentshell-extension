@@ -78,6 +78,15 @@ Manual repeats of those settings must agree; conflicts and unknown/disabled entr
 a worker or background job is started. If an entry omits cwd, the caller may choose it.
 Approval/tool controls and interactive options remain ordinary tool arguments.
 
+For the `subagent` tool's `roster_file` argument, omit the field or pass `null` when you do not
+want to supply a child roster file. For non-Pi agents, always omit it or pass `null`; do not use
+placeholder strings. A non-null string is still Pi-only.
+For `resources`, omit the field or pass `null` when you do not want to supply a manual resource
+selection. An explicit object (including `{}`) is a selection and must agree with a selected entry.
+Both nulls mean "not set", exactly like omission: they retain roster-entry defaults and saved
+settings on resume, rather than clearing them. This applies to tool arguments, not roster JSON
+files.
+
 Existing explicit calls remain valid. Ad-hoc calls can also select local resources and a child
 roster directly:
 

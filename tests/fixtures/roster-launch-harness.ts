@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Value } from "typebox/value";
 import extension from "../../index.ts";
 import { closeAgentShellWorkers } from "../../runner.ts";
 
@@ -66,6 +67,159 @@ export default async function rosterLaunchHarness(): Promise<void> {
     process.env.PATH = join(root, "bin");
     process.env.PI_AGENTSHELL_ROSTER_FILE = rosterPath;
     process.env.ROSTER_STARTED = started;
+    if (process.env.ROSTER_SCENARIO === "null-roster-schema") {
+      // Arrange: inspect the actual schema exposed to callers, without coercion.
+      const { tools } = await load();
+      const schema = tools.get("subagent")!.parameters;
+      const base = { agent_type: "pi", task_name: "Review", prompt: "Review it" };
+      // Act / Assert
+      for (const selection of [{}, { roster_file: null }, { roster_file: "child.json" }]) {
+        assert.equal(Value.Check(schema, { ...base, ...selection }), true,
+          `schema should accept ${JSON.stringify(selection)}`);
+      }
+      for (const roster_file of ["", 42, false, {}, []]) {
+        assert.equal(Value.Check(schema, { ...base, roster_file }), false);
+      }
+      const description = schema.properties.roster_file.description;
+      assert.match(description, /omit.*null/i);
+      assert.match(description, /non-Pi/i);
+      assert.match(description, /placeholder/i);
+      process.stderr.write("ROSTER_LAUNCH_OK\n");
+      return;
+    }
+    if (process.env.ROSTER_SCENARIO === "null-roster") {
+      // Arrange: real worker/adapters, with only the external native agents replaced.
+      const fakeCopilot = join(root, "bin/copilot");
+      copyFileSync(fileURLToPath(new URL("roster-copilot.py", import.meta.url)), fakeCopilot);
+      chmodSync(fakeCopilot, 0o755);
+      const childPath = join(root, "role/child.json");
+      writeFileSync(childPath, '{"roster":{"enabled":false}}');
+      writeFileSync(rosterPath, JSON.stringify({ roster: { enabled: true, roles: [role,
+        { ...role, name: "reviewer", agent_type: "copilot_cli" },
+        { ...role, name: "parent", roster_file: "child.json" },
+      ] } }));
+      const { tools, messages } = await load();
+      // Act / Assert: omission and null have identical native launch settings.
+      for (const selection of [{ agent_type: "copilot_cli" }, { roster_entry: "reviewer" },
+        { agent_type: "pi" }, { roster_entry: "owner" }, { roster_entry: "parent" }]) {
+        const omitted = await launch(tools, selection);
+        const nullable = await launch(tools, { ...selection, roster_file: null });
+        assert.equal(nullable.details.status, "ok");
+        assert.deepEqual(report(nullable), report(omitted));
+        assert.equal(report(nullable).roster,
+          selection.roster_entry === "parent" ? childPath : null);
+        // Rebuild from persisted launch records, just as a parent reload does.
+        const restored = await load();
+        const resume = { resume_session_id: nullable.details.sessionId };
+        const normal = await launch(restored.tools, resume);
+        const withNull = await launch(restored.tools, { ...resume, roster_file: null });
+        assert.equal(withNull.details.status, "ok");
+        assert.deepEqual(report(withNull), report(normal));
+        assert.ok(report(withNull).args.includes(nullable.details.sessionId));
+      }
+      // Null must preserve an ad-hoc saved child roster, not overwrite it on resume.
+      const first = await launch(tools, { agent_type: "pi", roster_file: childPath });
+      const restored = await load();
+      const resumed = await launch(restored.tools, {
+        resume_session_id: first.details.sessionId, roster_file: null,
+      });
+      assert.equal(report(resumed).roster, childPath);
+      // Legacy unrecorded ad-hoc sessions still allow null just like omission.
+      const legacy = await launch(tools, { agent_type: "pi",
+        resume_session_id: "legacy-native-session", roster_file: null });
+      assert.ok(report(legacy).args.includes("legacy-native-session"));
+      rmSync(started);
+      for (const mode of ["json", "rpc"] as const) {
+        for (const selection of [{ agent_type: "copilot_cli" }, { roster_entry: "reviewer" }]) {
+          await assert.rejects(launch(tools, { ...selection, roster_file: "x" }, mode),
+            /roster_file is supported only for agent_type "pi"/);
+          assert.equal(existsSync(started), false);
+          assert.equal(messages.length, 0);
+        }
+      }
+      process.stderr.write("ROSTER_LAUNCH_OK\n");
+      return;
+    }
+    if (process.env.ROSTER_SCENARIO === "null-resources-schema") {
+      // Arrange
+      const { tools } = await load();
+      const schema = tools.get("subagent")!.parameters;
+      const base = { agent_type: "pi", task_name: "Review", prompt: "Review it" };
+      // Act / Assert
+      for (const selection of [{}, { resources: null }, { resources: {} },
+        { resources: { skills: ["skill.md"], mcp_servers: null } }]) {
+        assert.equal(Value.Check(schema, { ...base, ...selection }), true,
+          `schema should accept ${JSON.stringify(selection)}`);
+      }
+      for (const resources of ["", 42, false, [], { unknown: true },
+        { packages: ["package"] }, { skills: [""] }]) {
+        assert.equal(Value.Check(schema, { ...base, resources }), false);
+      }
+      assert.match(schema.properties.resources.description, /omit.*null/i);
+      process.stderr.write("ROSTER_LAUNCH_OK\n");
+      return;
+    }
+    if (process.env.ROSTER_SCENARIO === "null-resources") {
+      // Arrange
+      const fakeCopilot = join(root, "bin/copilot");
+      copyFileSync(fileURLToPath(new URL("roster-copilot.py", import.meta.url)), fakeCopilot);
+      chmodSync(fakeCopilot, 0o755);
+      const skillPath = join(root, "role/skill.md");
+      writeFileSync(skillPath, "# Review skill");
+      const piResources = { skills: [skillPath] };
+      const copilotResources = { include_instruction_files: false };
+      writeFileSync(rosterPath, JSON.stringify({ roster: { enabled: true, roles: [role,
+        { ...role, name: "reviewer", agent_type: "copilot_cli" },
+        { ...role, name: "skilled", resources: piResources },
+        { ...role, name: "isolated", agent_type: "copilot_cli", resources: copilotResources },
+      ] } }));
+      const { tools } = await load();
+      // Act / Assert: null is neither an empty selection nor a request to clear a role.
+      for (const selection of [{ agent_type: "copilot_cli" }, { roster_entry: "reviewer" },
+        { agent_type: "pi" }, { roster_entry: "owner" },
+        { roster_entry: "skilled" }, { roster_entry: "isolated" }]) {
+        const omitted = await launch(tools, selection);
+        const nullable = await launch(tools, { ...selection, resources: null, roster_file: null });
+        assert.equal(nullable.details.status, "ok");
+        assert.deepEqual(report(nullable), report(omitted));
+        const restored = await load();
+        const resume = { resume_session_id: nullable.details.sessionId };
+        const normal = await launch(restored.tools, resume);
+        const withNull = await launch(restored.tools, {
+          ...resume, resources: null, roster_file: null,
+        });
+        assert.deepEqual(report(withNull), report(normal));
+        assert.ok(report(withNull).args.includes(nullable.details.sessionId));
+      }
+      // Ad-hoc resource selections must also survive null on resume after a reload.
+      for (const [agent_type, resources, expectedArg] of [
+        ["pi", piResources, skillPath],
+        ["copilot_cli", copilotResources, "--no-custom-instructions"],
+      ] as const) {
+        const first = await launch(tools, { agent_type, resources });
+        const restored = await load();
+        const resumed = await launch(restored.tools, {
+          resume_session_id: first.details.sessionId, resources: null, roster_file: null,
+        });
+        assert.ok(report(resumed).args.includes(expectedArg));
+        rmSync(started);
+        await assert.rejects(launch(restored.tools, {
+          resume_session_id: first.details.sessionId, resources: {},
+        }), /resources/);
+        assert.equal(existsSync(started), false);
+      }
+      const legacy = await launch(tools, { agent_type: "copilot_cli",
+        resume_session_id: "legacy-copilot-session", resources: null, roster_file: null });
+      assert.ok(report(legacy).args.includes("legacy-copilot-session"));
+      rmSync(started);
+      for (const roster_entry of ["reviewer", "skilled", "isolated"]) {
+        await assert.rejects(launch(tools, { roster_entry, resources: {} }),
+          /Manual resources conflicts/);
+        assert.equal(existsSync(started), false);
+      }
+      process.stderr.write("ROSTER_LAUNCH_OK\n");
+      return;
+    }
     if (process.env.ROSTER_SCENARIO === "nonpi") {
       const fakeCodex = join(root, "bin/codex");
       copyFileSync(fileURLToPath(new URL("roster-codex.py", import.meta.url)), fakeCodex);

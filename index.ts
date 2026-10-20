@@ -804,11 +804,12 @@ async function registerSubagentTool(
         minLength: 1,
         description: "Name from subagent_roster. Conflicting manual launch settings are rejected.",
       })),
-      roster_file: Type.Optional(Type.String({
-        minLength: 1,
-        description: "Pi-only child roster file; relative to effective cwd for ad-hoc calls",
+      roster_file: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+        description: "Pi-only child roster file; relative to effective cwd for ad-hoc calls. " +
+          "If no child roster file is wanted, omit this field or pass null. " +
+          "For non-Pi agents, always omit it or pass null. Do not use placeholder strings.",
       })),
-      resources: Type.Optional(Type.Object({
+      resources: Type.Optional(Type.Union([Type.Object({
         skills: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
         plugins: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
         extensions: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
@@ -820,9 +821,9 @@ async function registerSubagentTool(
         inherit_project_resources: Type.Optional(Type.Boolean()),
         include_instruction_files: Type.Optional(Type.Boolean()),
         include_home_system_prompt: Type.Optional(Type.Boolean()),
-      }, {
-        additionalProperties: false,
+      }, { additionalProperties: false }), Type.Null()], {
         description: "Local resource paths and discovery controls; paths are relative to cwd. " +
+          "Omit this field or pass null when not supplying a manual resource selection. " +
           "Provision files first. Unsupported selections fail; resources stay fixed on resume.",
       })),
       task_name: Type.String({
@@ -937,7 +938,12 @@ async function registerSubagentTool(
       return new Text(theme.fg(color, output), 0, 0);
     },
 
-    async execute(_toolCallId, params, toolSignal, _onUpdate, ctx) {
+    async execute(_toolCallId, input, toolSignal, _onUpdate, ctx) {
+      // Drop null before restoring saved settings: null means omitted, not cleared.
+      const { roster_file, resources, ...provided } = input;
+      let params = { ...provided,
+        ...(roster_file == null ? {} : { roster_file }),
+        ...(resources == null ? {} : { resources }) };
       const silent = isSilentMode();
       if (params.resume_session_id === "new" || params.resume_session_id?.startsWith("job-")) {
         throw new Error(`Use a returned native Session ID. ${RESUME_SESSION_GUIDANCE}`);

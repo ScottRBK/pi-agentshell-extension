@@ -51,6 +51,22 @@ test("non-Pi named/ad-hoc calls reject child rosters before jobs or native launc
   runHarness("nonpi");
 });
 
+test("roster_file schema accepts omission, null and paths, with explicit caller guidance", () => {
+  runHarness("null-roster-schema");
+});
+
+test("Pi/Copilot launches and saved resumes treat null child rosters as omitted", () => {
+  runHarness("null-roster");
+});
+
+test("resources schema accepts omission, null and objects, but rejects invalid selections", () => {
+  runHarness("null-resources-schema");
+});
+
+test("Pi/Copilot launches and saved resumes treat null resources as omitted", () => {
+  runHarness("null-resources");
+});
+
 test("concurrent children scope rosters and retain depth policy", () => {
   runHarness("scoping");
 });
