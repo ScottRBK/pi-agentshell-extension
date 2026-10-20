@@ -133,6 +133,11 @@ function localPath(value: unknown, base: string, field: string): string {
   return path;
 }
 
+function localResourcePaths(value: unknown, base: string, field: string): string[] {
+  if (!Array.isArray(value)) throw new Error(`${field} must be an array`);
+  return value.map((path) => localPath(path, base, field));
+}
+
 /** The extension accepts provisioned local resources only; it never installs packages. */
 export function resolveSessionResources(value: unknown, base: string): AgentShellResources {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -144,24 +149,60 @@ export function resolveSessionResources(value: unknown, base: string): AgentShel
     include_instruction_files: true, include_home_system_prompt: true,
   };
   for (const [key, setting] of Object.entries(value)) {
-    if (key === "skills" || key === "plugins" || key === "extensions") {
-      if (!Array.isArray(setting)) throw new Error(`resources.${key} must be an array`);
-      result[key] = setting.map((path) => localPath(path, base, `resources.${key}`));
-    } else if (key === "packages" || key === "mcp_servers") {
-      if (key === "mcp_servers" && setting === null) continue;
-      if (!Array.isArray(setting) || setting.length !== 0) {
-        throw new Error(`resources.${key} supports only []; provision local files separately`);
-      }
-      result[key] = [];
-    } else if (key === "inherit_personal_resources" || key === "inherit_project_resources"
-      || key === "include_instruction_files" || key === "include_home_system_prompt") {
-      if (typeof setting !== "boolean") throw new Error(`resources.${key} must be a boolean`);
-      result[key] = setting;
-    } else {
-      throw new Error(`Unknown resources setting "${key}"`);
+    switch (key) {
+      case "skills":
+      case "plugins":
+      case "extensions":
+        result[key] = localResourcePaths(setting, base, `resources.${key}`);
+        break;
+      case "packages":
+      case "mcp_servers":
+        if (key === "mcp_servers" && setting === null) break;
+        if (!Array.isArray(setting) || setting.length !== 0) {
+          throw new Error(`resources.${key} supports only []; provision local files separately`);
+        }
+        result[key] = [];
+        break;
+      case "inherit_personal_resources":
+      case "inherit_project_resources":
+      case "include_instruction_files":
+      case "include_home_system_prompt":
+        if (typeof setting !== "boolean") throw new Error(`resources.${key} must be a boolean`);
+        result[key] = setting;
+        break;
+      default:
+        throw new Error(`Unknown resources setting "${key}"`);
     }
   }
   return result;
+}
+
+function validateRosterRoleFields(
+  role: Record<string, unknown>,
+  index: number,
+  configPath: string,
+): void {
+  const fields = ["name", "description", "agent_type", "model", "effort"] as const;
+  for (const key of Object.keys(role)) {
+    if (![...fields, "cwd", "roster_file", "resources"].includes(key)) {
+      throw invalidConfiguration(
+        configPath,
+        `unknown roster.roles[${index}] setting "${key}"`,
+      );
+    }
+  }
+  for (const field of fields) {
+    if (typeof role[field] !== "string" || role[field].trim().length === 0) {
+      throw invalidConfiguration(
+        configPath,
+        `roster.roles[${index}].${field} must be a non-empty string`,
+      );
+    }
+  }
+  if ("roster_file" in role && role.agent_type !== "pi") {
+    throw invalidConfiguration(configPath,
+      `roster.roles[${index}].roster_file is supported only for agent_type "pi"`);
+  }
 }
 
 function parseRoster(value: unknown, configPath: string): AgentShellRosterConfig {
@@ -188,27 +229,7 @@ function parseRoster(value: unknown, configPath: string): AgentShellRosterConfig
             `roster.roles[${index}] must be a JSON object`,
           );
         }
-        const fields = ["name", "description", "agent_type", "model", "effort"] as const;
-        for (const key of Object.keys(role)) {
-          if (![...fields, "cwd", "roster_file", "resources"].includes(key)) {
-            throw invalidConfiguration(
-              configPath,
-              `unknown roster.roles[${index}] setting "${key}"`,
-            );
-          }
-        }
-        for (const field of fields) {
-          if (typeof role[field] !== "string" || role[field].trim().length === 0) {
-            throw invalidConfiguration(
-              configPath,
-              `roster.roles[${index}].${field} must be a non-empty string`,
-            );
-          }
-        }
-        if ("roster_file" in role && role.agent_type !== "pi") {
-          throw invalidConfiguration(configPath,
-            `roster.roles[${index}].roster_file is supported only for agent_type "pi"`);
-        }
+        validateRosterRoleFields(role, index, configPath);
         const parsedRole = { ...role } as AgentShellRosterRole;
         try {
           for (const field of ["cwd", "roster_file"] as const) {
