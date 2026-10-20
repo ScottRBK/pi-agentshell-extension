@@ -14,6 +14,7 @@ from agent_shell.models.agent import StreamEvent
 from agent_shell.shell import AgentShell
 
 _SCREEN_POLL_INTERVAL = 0.25
+_PARTIAL_CAPTURE_LABEL = "Terminal capture (partial; may be incomplete)"
 _ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 _BUSY_STATUS = re.compile(
     r"^\s*(?:thinking|working|loading|generating|executing|processing|"
@@ -79,7 +80,7 @@ async def wait_for_stdin_eof() -> None:
 
     try:
         loop.add_reader(fd, on_readable)
-    except (NotImplementedError, RuntimeError) as error:
+    except RuntimeError as error:
         raise RuntimeError(
             "interactive worker requires an event-loop readable stdin"
         ) from error
@@ -510,7 +511,7 @@ async def observe_interactive(
                 if event.type == "error":
                     if not structured_text:
                         await emit_terminal_capture(
-                            "Terminal capture (partial; may be incomplete)",
+                            _PARTIAL_CAPTURE_LABEL,
                             "Interactive harness reported an error before structured output; "
                             "terminal capture may be incomplete.",
                         )
@@ -520,7 +521,7 @@ async def observe_interactive(
                 if event.type == "process_exit":
                     if not structured_text:
                         await emit_terminal_capture(
-                            "Terminal capture (partial; may be incomplete)",
+                            _PARTIAL_CAPTURE_LABEL,
                             "Interactive harness exited before structured output; terminal "
                             "capture may be incomplete.",
                         )
@@ -531,7 +532,7 @@ async def observe_interactive(
                     if event.content != "ok":
                         if not structured_text:
                             await emit_terminal_capture(
-                                "Terminal capture (partial; may be incomplete)",
+                                _PARTIAL_CAPTURE_LABEL,
                                 "Interactive harness reported an unsuccessful result "
                                 "before structured output; terminal capture may be incomplete.",
                             )

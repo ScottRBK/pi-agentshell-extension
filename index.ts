@@ -188,9 +188,12 @@ function formatJobWidgetRow(
     job.model ?? "default",
     job.effort ?? "default",
   ].join("/");
-  const status = deliveryStatus === undefined
-    ? job.status === "cancelled" ? " · cancelling…" : ""
-    : ` · ${deliveryStatus} · delivering…`;
+  let status = "";
+  if (deliveryStatus !== undefined) {
+    status = ` · ${deliveryStatus} · delivering…`;
+  } else if (job.status === "cancelled") {
+    status = " · cancelling…";
+  }
 
   return `${branch} ${taskName} · ${runtime} · ${job.id.slice(0, 12)}${status}`;
 }
@@ -399,7 +402,12 @@ function updateJobWidget(
     cancelling > 0 ? `${cancelling} cancelling` : "",
     delivering > 0 ? `${delivering} delivering` : "",
   ].filter((part) => part.length > 0);
-  const glyph = running > 0 ? "●" : cancelling > 0 ? "■" : "◆";
+  let glyph = "◆";
+  if (running > 0) {
+    glyph = "●";
+  } else if (cancelling > 0) {
+    glyph = "■";
+  }
   const header = ctx.ui.theme.fg(
     cancelling > 0 && running === 0 ? "warning" : "accent",
     `${glyph} Background agents · ${counts.join(" · ")}`,
@@ -412,13 +420,14 @@ function updateJobWidget(
     const isLast = hiddenJobs.length === 0 && index === visibleJobs.length - 1;
     const deliveryStatus = deliveries.get(job.id);
     const row = formatJobWidgetRow(job, isLast, deliveryStatus);
-    const styledRow = deliveryStatus === "completed"
-      ? ctx.ui.theme.fg("success", row)
-      : deliveryStatus === "failed"
-      ? ctx.ui.theme.fg("error", row)
-      : job.status === "cancelled"
-      ? ctx.ui.theme.fg("warning", row)
-      : row;
+    let styledRow = row;
+    if (deliveryStatus === "completed") {
+      styledRow = ctx.ui.theme.fg("success", row);
+    } else if (deliveryStatus === "failed") {
+      styledRow = ctx.ui.theme.fg("error", row);
+    } else if (job.status === "cancelled") {
+      styledRow = ctx.ui.theme.fg("warning", row);
+    }
 
     rows.push(styledRow);
 
@@ -435,11 +444,12 @@ function updateJobWidget(
   });
 
   if (hiddenJobs.length > 0) {
-    const hiddenStatus = hiddenJobs.every((job) => job.status === "running")
-      ? "running"
-      : hiddenJobs.every((job) => deliveries.has(job.id))
-      ? "delivering"
-      : "active";
+    let hiddenStatus = "active";
+    if (hiddenJobs.every((job) => job.status === "running")) {
+      hiddenStatus = "running";
+    } else if (hiddenJobs.every((job) => deliveries.has(job.id))) {
+      hiddenStatus = "delivering";
+    }
     rows.push(
       ctx.ui.theme.fg(
         "dim",
@@ -617,11 +627,12 @@ function registerJobMessageRenderer(pi: ExtensionAPI): void {
         return new Text([...warnings, completed].join("\n"), 0, 0);
       }
 
-      const color = details?.status === "failed"
-        ? "error"
-        : details?.status === "cancelled"
-        ? "warning"
-        : "toolOutput";
+      let color: "error" | "warning" | "toolOutput" = "toolOutput";
+      if (details?.status === "failed") {
+        color = "error";
+      } else if (details?.status === "cancelled") {
+        color = "warning";
+      }
 
       return new Text(theme.fg(color, content), 0, 0);
     },

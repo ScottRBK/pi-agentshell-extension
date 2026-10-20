@@ -121,8 +121,13 @@ function localPath(value: unknown, base: string, field: string): string {
   }
   const path = resolve(base, value);
   const stat = statSync(path, { throwIfNoEntry: false });
-  if (!stat || (field === "cwd" ? !stat.isDirectory()
-    : field === "roster_file" ? !stat.isFile() : !stat.isFile() && !stat.isDirectory())) {
+  let valid = stat?.isFile() || stat?.isDirectory();
+  if (field === "cwd") {
+    valid = stat?.isDirectory();
+  } else if (field === "roster_file") {
+    valid = stat?.isFile();
+  }
+  if (!valid) {
     throw new Error(`Invalid ${field} path: ${path}`);
   }
   return path;

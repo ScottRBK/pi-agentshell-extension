@@ -177,7 +177,7 @@ export class JobRegistry {
   cancel(id: string): boolean {
     const job = this.#jobs.get(id);
 
-    if (job === undefined || job.status !== "running") {
+    if (job?.status !== "running") {
       return false;
     }
 
