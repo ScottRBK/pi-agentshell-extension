@@ -273,6 +273,88 @@ export function loadAgentShellRosterFile(path: string): AgentShellRosterConfig {
   return parseRoster(selected.roster, path);
 }
 
+function resolveSelectedRosterPath(): string | undefined {
+  const rosterFile = process.env.PI_AGENTSHELL_ROSTER_FILE;
+  if (rosterFile !== undefined && (!rosterFile.trim() || rosterFile.includes("\0"))) {
+    throw new Error("PI_AGENTSHELL_ROSTER_FILE must be a non-empty path without NUL");
+  }
+  return rosterFile === undefined ? undefined : resolve(rosterFile);
+}
+
+function parseMaxSubAgentDepth(value: unknown, configPath: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw invalidConfiguration(
+      configPath,
+      "max_sub_agent_depth must be a nonnegative safe integer",
+    );
+  }
+  return value;
+}
+
+function applyInteractiveOverrides(
+  interactive: AgentShellInteractiveConfig,
+  value: unknown,
+  configPath: string,
+): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw invalidConfiguration(configPath, "interactive must be a JSON object");
+  }
+
+  for (const [setting, settingValue] of Object.entries(value)) {
+    switch (setting) {
+      case "inactivity_timeout":
+        if (
+          typeof settingValue !== "number" ||
+          !Number.isFinite(settingValue) ||
+          settingValue <= 0
+        ) {
+          throw invalidConfiguration(
+            configPath,
+            `${setting} must be a positive finite number`,
+          );
+        }
+        interactive.inactivity_timeout = settingValue;
+        break;
+      case "enabled":
+      case "stay_open":
+      case "inactivity_enabled":
+        if (typeof settingValue !== "boolean") {
+          throw invalidConfiguration(configPath, `${setting} must be a boolean`);
+        }
+        interactive[setting] = settingValue;
+        break;
+      default:
+        throw invalidConfiguration(configPath, `unknown interactive setting "${setting}"`);
+    }
+  }
+}
+
+function applyLimitOverride(
+  limits: AgentShellLimits,
+  setting: string,
+  value: unknown,
+  configPath: string,
+): void {
+  if (!LIMIT_SETTINGS.has(setting as keyof AgentShellLimits)) {
+    throw invalidConfiguration(configPath, `unknown setting "${setting}"`);
+  }
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw invalidConfiguration(configPath, `${setting} must be a positive safe integer`);
+  }
+  limits[setting as keyof AgentShellLimits] = value;
+}
+
+function validateContentLimits(limits: AgentShellLimits, configPath: string): void {
+  for (const setting of ["max_output_bytes", "max_message_bytes"] as const) {
+    if (limits[setting] > limits.max_protocol_bytes) {
+      throw invalidConfiguration(
+        configPath,
+        `${setting} cannot exceed max_protocol_bytes`,
+      );
+    }
+  }
+}
+
 export function loadAgentShellConfig(
   agentDirectory: string,
   inheritedMaxDepth?: number,
@@ -283,11 +365,7 @@ export function loadAgentShellConfig(
     "agentshell.json",
   );
 
-  const rosterFile = process.env.PI_AGENTSHELL_ROSTER_FILE;
-  if (rosterFile !== undefined && (!rosterFile.trim() || rosterFile.includes("\0"))) {
-    throw new Error("PI_AGENTSHELL_ROSTER_FILE must be a non-empty path without NUL");
-  }
-  const selectedPath = rosterFile === undefined ? undefined : resolve(rosterFile);
+  const selectedPath = resolveSelectedRosterPath();
   const overrides = existsSync(configPath) ? readConfiguration(configPath) : {};
   const limits = { ...DEFAULT_AGENT_SHELL_LIMITS };
   let maxSubAgentDepth = inheritedMaxDepth ?? 0;
@@ -298,124 +376,30 @@ export function loadAgentShellConfig(
     : loadAgentShellRosterFile(selectedPath);
 
   for (const [setting, value] of Object.entries(overrides)) {
-    if (setting === "max_sub_agent_depth") {
-      // Descendants use their root's policy, not a later or different local setting.
-      if (inheritedMaxDepth !== undefined) continue;
-      if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-        throw invalidConfiguration(
-          configPath,
-          "max_sub_agent_depth must be a nonnegative safe integer",
-        );
-      }
-      maxSubAgentDepth = value;
-      continue;
-    }
-
-    if (setting === "silent") {
-      if (typeof value !== "boolean") {
-        throw invalidConfiguration(configPath, "silent must be a boolean");
-      }
-      silent = value;
-      continue;
-    }
-
-    if (setting === "roster") {
-      if (selectedPath === undefined) roster = parseRoster(value, configPath);
-      continue;
-    }
-
-    if (setting === "interactive") {
-      if (
-        typeof value !== "object" ||
-        value === null ||
-        Array.isArray(value)
-      ) {
-        throw invalidConfiguration(
-          configPath,
-          "interactive must be a JSON object",
-        );
-      }
-
-      for (const [interactiveSetting, interactiveValue] of Object.entries(
-        value,
-      )) {
-        if (
-          !(
-            interactiveSetting === "enabled" ||
-            interactiveSetting === "stay_open" ||
-            interactiveSetting === "inactivity_timeout" ||
-            interactiveSetting === "inactivity_enabled"
-          )
-        ) {
-          throw invalidConfiguration(
-            configPath,
-            `unknown interactive setting "${interactiveSetting}"`,
-          );
+    switch (setting) {
+      case "max_sub_agent_depth":
+        // Descendants use their root's policy, not a later or different local setting.
+        if (inheritedMaxDepth !== undefined) break;
+        maxSubAgentDepth = parseMaxSubAgentDepth(value, configPath);
+        break;
+      case "silent":
+        if (typeof value !== "boolean") {
+          throw invalidConfiguration(configPath, "silent must be a boolean");
         }
-
-        if (
-          interactiveSetting === "inactivity_timeout"
-        ) {
-          if (
-            typeof interactiveValue !== "number" ||
-            !Number.isFinite(interactiveValue) ||
-            interactiveValue <= 0
-          ) {
-            throw invalidConfiguration(
-              configPath,
-              `${interactiveSetting} must be a positive finite number`,
-            );
-          }
-
-          interactive.inactivity_timeout = interactiveValue;
-          continue;
-        }
-
-        if (typeof interactiveValue !== "boolean") {
-          throw invalidConfiguration(
-            configPath,
-            `${interactiveSetting} must be a boolean`,
-          );
-        }
-
-        interactive[interactiveSetting] = interactiveValue;
-      }
-
-      continue;
+        silent = value;
+        break;
+      case "roster":
+        if (selectedPath === undefined) roster = parseRoster(value, configPath);
+        break;
+      case "interactive":
+        applyInteractiveOverrides(interactive, value, configPath);
+        break;
+      default:
+        applyLimitOverride(limits, setting, value, configPath);
     }
-
-    if (!LIMIT_SETTINGS.has(setting as keyof AgentShellLimits)) {
-      throw invalidConfiguration(
-        configPath,
-        `unknown setting "${setting}"`,
-      );
-    }
-
-    if (
-      typeof value !== "number" ||
-      !Number.isSafeInteger(value) ||
-      value <= 0
-    ) {
-      throw invalidConfiguration(
-        configPath,
-        `${setting} must be a positive safe integer`,
-      );
-    }
-
-    limits[setting as keyof AgentShellLimits] = value;
   }
 
-  for (const setting of [
-    "max_output_bytes",
-    "max_message_bytes",
-  ] as const) {
-    if (limits[setting] > limits.max_protocol_bytes) {
-      throw invalidConfiguration(
-        configPath,
-        `${setting} cannot exceed max_protocol_bytes`,
-      );
-    }
-  }
+  validateContentLimits(limits, configPath);
 
   return { ...limits, max_sub_agent_depth: maxSubAgentDepth, silent, interactive, roster,
     ...(selectedPath === undefined ? {} : { rosterFile: selectedPath }) };
