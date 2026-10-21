@@ -73,6 +73,19 @@ class WorkerProtocolTest(unittest.TestCase):
             fake.chmod(0o755)
             cases = [
                 (None, "resources must be a JSON object"),
+                ({"packages": None}, "resources.packages supports only []"),
+                ({"mcp_servers": False}, "resources.mcp_servers supports only []"),
+                ({"skills": "skill.md"}, "resources.skills must be an array of local paths"),
+                ({"skills": [123]}, "resources.skills must be an array of local paths"),
+                ({"skills": [" "]}, "resources.skills must be an array of local paths"),
+                ({"skills": ["bad\u0000.md"]}, "resources.skills must be an array of local paths"),
+                ({"skills": ["https://host/skill"]}, "requires provisioned local paths"),
+                ({"plugins": ["~/plugin"]}, "requires provisioned local paths"),
+                ({"extensions": ["NPM:local"]}, "requires provisioned local paths"),
+                ({"inherit_personal_resources": None}, "must be a boolean"),
+                ({"inherit_project_resources": 0}, "must be a boolean"),
+                ({"include_instruction_files": None}, "must be a boolean"),
+                ({"include_home_system_prompt": "false"}, "must be a boolean"),
                 ({"packages": [{"source": "npm:never-install@1.0.0"}]},
                  "packages supports only []"),
                 ({"mcp_servers": [{"name": "remote"}]}, "mcp_servers supports only []"),
@@ -99,6 +112,21 @@ class WorkerProtocolTest(unittest.TestCase):
                         self.assertEqual(messages[-1]["kind"], "fatal", messages)
                         self.assertIn(expected, messages[-1]["message"])
                         self.assertFalse(marker.exists())
+
+    def test_default_resource_selections_preserve_headless_execution(self) -> None:
+        # Arrange: default selections still run through the real worker and AgentShell.
+        for resources in ({}, {"mcp_servers": None},
+                          {"skills": [], "plugins": [], "extensions": [], "packages": []}):
+            with self.subTest(resources=resources):
+                # Act
+                completed, messages = self.run_worker({
+                    "agent_type": "codex", "cwd": str(PYTHON_DIR), "prompt": "Report defaults",
+                    "resources": resources,
+                })
+                # Assert
+                self.assertEqual(completed.returncode, 0, messages)
+                self.assertEqual(messages[-1]["event"]["type"], "result")
+                self.assertEqual(messages[-1]["event"]["content"], "ok")
 
     def test_lists_agent_types_from_agent_shell(self) -> None:
        completed, messages = self.run_worker({

@@ -95,7 +95,7 @@ class _InteractiveWorkerError(RuntimeError):
 
 
 
-async def main() -> int:
+def _read_request() -> dict[str, object]:
     # The request is deliberately one newline-delimited object. For headless callers that
     # still send JSON+EOF, readline() returns the complete object at EOF as before.
     request_line = sys.stdin.readline()
@@ -105,7 +105,11 @@ async def main() -> int:
 
     if not isinstance(request, dict):
         raise ValueError("request must be a JSON object")
+    return request
 
+
+async def main() -> int:
+    request = _read_request()
     interactive = request.get("interactive", False)
     if not isinstance(interactive, bool):
         raise ValueError("interactive must be a boolean")
@@ -291,28 +295,36 @@ def session_resources(request: dict[str, object]) -> dict:
     if not isinstance(value, dict):
         raise ValueError("resources must be a JSON object")
     for key, setting in value.items():
-        if key in {"packages", "mcp_servers"}:
-            if key == "mcp_servers" and setting is None:
-                continue
-            if setting != []:
-                raise ValueError(
-                    f"resources.{key} supports only []; provision local files separately"
-                )
-        elif key in {"skills", "plugins", "extensions"}:
-            if not isinstance(setting, list) or any(
-                not isinstance(path, str) or not path.strip() or "\u0000" in path
-                for path in setting
-            ):
-                raise ValueError(f"resources.{key} must be an array of local paths")
-            if any(re.match(r"^(?:[a-z]+:|~)", path, re.I) for path in setting):
-                raise ValueError(f"resources.{key} requires provisioned local paths")
-        elif key in {"inherit_personal_resources", "inherit_project_resources",
-                     "include_instruction_files", "include_home_system_prompt"}:
-            if not isinstance(setting, bool):
-                raise ValueError(f"resources.{key} must be a boolean")
-        else:
-            raise ValueError(f"Unknown resources setting {key!r}")
+        _validate_resource_setting(key, setting)
     return {"resources": SessionResources(**value)}
+
+
+def _validate_resource_setting(key: str, setting: object) -> None:
+    if key in {"packages", "mcp_servers"}:
+        if key == "mcp_servers" and setting is None:
+            return
+        if setting != []:
+            raise ValueError(
+                f"resources.{key} supports only []; provision local files separately"
+            )
+    elif key in {"skills", "plugins", "extensions"}:
+        _validate_resource_paths(key, setting)
+    elif key in {"inherit_personal_resources", "inherit_project_resources",
+                 "include_instruction_files", "include_home_system_prompt"}:
+        if not isinstance(setting, bool):
+            raise ValueError(f"resources.{key} must be a boolean")
+    else:
+        raise ValueError(f"Unknown resources setting {key!r}")
+
+
+def _validate_resource_paths(key: str, setting: object) -> None:
+    if not isinstance(setting, list) or any(
+        not isinstance(path, str) or not path.strip() or "\u0000" in path
+        for path in setting
+    ):
+        raise ValueError(f"resources.{key} must be an array of local paths")
+    if any(re.match(r"^(?:[a-z]+:|~)", path, re.I) for path in setting):
+        raise ValueError(f"resources.{key} requires provisioned local paths")
 
 
 def parse_inactivity_timeout(value: object) -> float:
@@ -607,19 +619,8 @@ def is_interactive_prompt(screen: str) -> bool:
     if _PROMPT_LINE.search(lines[-1]):
         return True
 
-    footer_index = next(
-        (index for index in range(len(lines) - 1, -1, -1)
-         if _PROMPT_FOOTER.search(lines[index])),
-        None,
-    )
-    if footer_index is not None and footer_index >= len(lines) - 3:
-        following = lines[footer_index + 1:]
-        closes_box = not following or all(
-            line.lstrip().startswith(("╰", "╯", "└", "┘", "+"))
-            for line in following
-        )
-        if closes_box:
-            return True
+    if _has_active_prompt_footer(lines):
+        return True
 
     for index, line in enumerate(lines):
         if not _PROMPT_QUESTION.search(line):
@@ -643,6 +644,21 @@ def is_interactive_prompt(screen: str) -> bool:
                 # footer, even if the menu itself remains visible.
                 continue
         return True
+    return False
+
+
+def _has_active_prompt_footer(lines: list[str]) -> bool:
+    footer_index = next(
+        (index for index in range(len(lines) - 1, -1, -1)
+         if _PROMPT_FOOTER.search(lines[index])),
+        None,
+    )
+    if footer_index is not None and footer_index >= len(lines) - 3:
+        following = lines[footer_index + 1:]
+        return not following or all(
+            line.lstrip().startswith(("╰", "╯", "└", "┘", "+"))
+            for line in following
+        )
     return False
 
 
