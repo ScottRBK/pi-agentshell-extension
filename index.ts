@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { isDeepStrictEqual, stripVTControlCharacters } from "node:util";
+import { inspect, isDeepStrictEqual, stripVTControlCharacters } from "node:util";
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
@@ -53,6 +53,8 @@ const JOB_WIDGET_OPTIONS = { placement: "aboveEditor" as const };
 const MAX_WIDGET_ACTIVITY_CHARACTERS = 40;
 const MAX_INSPECTION_ACTIVITY_ENTRIES = 20;
 const MAX_INSPECTION_ENTRY_CHARACTERS = 400;
+const MAX_ERROR_DIAGNOSTIC_CHARACTERS = 4_000;
+const UNKNOWN_ERROR_MESSAGE = "Unknown error (no readable message).";
 const RESUME_SESSION_GUIDANCE = [
   "Omit `resume_session_id` for a new session.",
   "If the tool-call interface requires this property, use `null` for a new session.",
@@ -156,8 +158,56 @@ function formatJobLaunch(jobId: string) {
   };
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function readErrorMessage(error: unknown): string | undefined {
+  try {
+    switch (typeof error) {
+      case "string":
+        return error;
+      case "number":
+      case "boolean":
+      case "bigint":
+      case "symbol":
+        return String(error);
+      case "undefined":
+        return "undefined";
+      case "object":
+      case "function": {
+        if (error === null) return "null";
+        // Even Error.message can be a throwing getter or proxy trap.
+        const message: unknown = Reflect.get(error, "message");
+        return typeof message === "string" ? message : undefined;
+      }
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+function localErrorDiagnostic(error: unknown): string {
+  const message = readErrorMessage(error);
+  if (message !== undefined) return message;
+
+  // Debugging only, not redaction. Never send arbitrary inspected fields to the model.
+  try {
+    const detail = inspect(error, {
+      depth: 2, maxArrayLength: 10, maxStringLength: 500,
+      customInspect: false, getters: false, colors: false,
+    });
+    const safe = stripVTControlCharacters(detail)
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+    return safe.length > MAX_ERROR_DIAGNOSTIC_CHARACTERS
+      ? `${safe.slice(0, MAX_ERROR_DIAGNOSTIC_CHARACTERS - 1)}…` : safe;
+  } catch {
+    return UNKNOWN_ERROR_MESSAGE;
+  }
+}
+
+function logLocalError(context: string, error: unknown): void {
+  try {
+    process.stderr.write(`${context}: ${localErrorDiagnostic(error)}\n`);
+  } catch {
+    // Diagnostics are best-effort and must not prevent job delivery or cleanup.
+  }
 }
 
 function formatTerminalMessage(
@@ -473,9 +523,7 @@ function safelyUpdateJobWidget(
   try {
     updateJobWidget(ctx, jobs, deliveries);
   } catch (error) {
-    process.stderr.write(
-      `Could not update AgentShell job widget: ${errorMessage(error)}\n`,
-    );
+    logLocalError("Could not update AgentShell job widget", error);
   }
 }
 
@@ -515,9 +563,7 @@ function deliverTerminalMessage(
     );
     onWidgetChange();
   } catch (error) {
-    process.stderr.write(
-      `Could not deliver subagent job ${jobId}: ${errorMessage(error)}\n`,
-    );
+    logLocalError(`Could not deliver subagent job ${jobId}`, error);
     deliveries.delete(jobId);
     jobs.remove(jobId);
     onWidgetChange();
@@ -1156,6 +1202,10 @@ async function registerSubagentTool(
           const status = jobs.get(job.id)?.status === "cancelled"
             ? "cancelled"
             : "failed";
+          const message = readErrorMessage(error);
+          if (message === undefined) {
+            logLocalError(`Subagent job ${job.id} ${status}`, error);
+          }
 
           sendTerminalMessage(
             pi,
@@ -1163,7 +1213,7 @@ async function registerSubagentTool(
             {
               jobId: job.id,
               status,
-              output: errorMessage(error),
+              output: message ?? UNKNOWN_ERROR_MESSAGE,
               warnings: [],
               silent,
             },
@@ -1385,7 +1435,7 @@ export default async function subagentsExtension(
           "info",
         );
       } catch (error) {
-        ctx.ui.notify(`Could not toggle subagent roster: ${errorMessage(error)}`, "error");
+        ctx.ui.notify(`Could not toggle subagent roster: ${localErrorDiagnostic(error)}`, "error");
       }
     },
   });

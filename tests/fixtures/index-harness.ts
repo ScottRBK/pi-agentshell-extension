@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { ChildProcess } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -8,7 +9,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mock } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { inspect } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -261,6 +264,9 @@ export default async function indexHarness(): Promise<void> {
   const tools: CapturedTool[] = [];
   let deferMessageDelivery = false;
   let rejectActivityWidget = false;
+  let widgetFailure: (() => void) | undefined;
+  let deliveryFailure: (() => void) | undefined;
+  let rosterFailure: (() => void) | undefined;
   let parentAgentIdle = true;
   let eventContext: unknown;
 
@@ -317,7 +323,13 @@ export default async function indexHarness(): Promise<void> {
       }
     },
     appendEntry() {},
+    getActiveTools() {
+      rosterFailure?.();
+      return tools.map(({ name }) => name);
+    },
+    setActiveTools() {},
     sendMessage(message: CapturedMessage, options: SentMessage["options"]) {
+      deliveryFailure?.();
       sentMessages.push({ message, options });
 
       if (!deferMessageDelivery) {
@@ -362,6 +374,7 @@ export default async function indexHarness(): Promise<void> {
         content: string[] | undefined,
         options?: CapturedWidget["options"],
       ) {
+        widgetFailure?.();
         if (
           rejectActivityWidget &&
           content?.some((line) => line.includes("Last activity"))
@@ -415,6 +428,210 @@ export default async function indexHarness(): Promise<void> {
   assert.equal(statusTool.parameters.properties?.job_id?.minLength, 1);
   assert.deepEqual(modelsTool.parameters.required, ["agent_type"]);
   assert.equal(modelsTool.parameters.properties?.cwd?.type, "string");
+
+  const diagnosticScenario = process.env.INDEX_DIAGNOSTICS_TEST;
+  if (diagnosticScenario) {
+    // Arrange: fail the public UI boundary while real jobs run through the worker.
+    const previousPath = process.env.PATH;
+    process.env.PATH = FAKE_BIN;
+    const diagnostics: string[] = [];
+    let rejectStderr = false;
+    const stderr = mock.method(process.stderr, "write", (chunk: string | Uint8Array) => {
+      diagnostics.push(String(chunk));
+      if (rejectStderr) throw new Error("stderr unavailable");
+      return true;
+    });
+    const circular: Record<string, unknown> = { code: "WIDGET_BROKEN", count: 7n };
+    circular.self = circular;
+    let hookCalls = 0;
+    const forbiddenHook = () => { hookCalls++; throw new Error("hook must not execute"); };
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    const unreadableError = Object.defineProperty(new Error(), "message", {
+      get() { throw new Error("message unreadable"); },
+    });
+    const longMessage = `worker failed\nPartial output:\n${"x".repeat(5_000)}\nEND_OF_OUTPUT`;
+    const cases = [
+      { name: "circular BigInt", error: circular, expected: /WIDGET_BROKEN.*7n.*Circular/ },
+      { name: "hooks", error: { code: "NO_HOOKS", toString: forbiddenHook,
+        toJSON: forbiddenHook, [Symbol.toPrimitive]: forbiddenHook,
+        [inspect.custom]: forbiddenHook, get detail() { return forbiddenHook(); } },
+        expected: /NO_HOOKS/ },
+      { name: "message getter", error: { code: "GETTER_FAILED",
+        get message() { throw new Error("unreadable"); } }, expected: /GETTER_FAILED/ },
+      { name: "null prototype", error: Object.assign(Object.create(null), { code: "NO_PROTO" }),
+        expected: /NO_PROTO/ },
+      { name: "revoked proxy", error: revoked.proxy, expected: /Revoked Proxy|Unknown error/ },
+      { name: "throwing proxy", error: new Proxy({ code: "PROXY_FAILED" }, {
+        get() { throw new Error("get trap"); },
+        getPrototypeOf() { throw new Error("prototype trap"); },
+      }), expected: /PROXY_FAILED|Unknown error/ },
+      { name: "unreadable Error", error: unreadableError, expected: /Error|Unknown error/ },
+      { name: "inspection failure", error: {
+        get [Symbol.toStringTag]() { throw new Error("tag unreadable"); },
+      }, expected: /Unknown error/ },
+      { name: "terminal controls", error: Object.create(null, {
+        [Symbol.toStringTag]: { value: "\u001b[31mTAG\u001b[0m\r\u0007\u009b2J" },
+      }), expected: /TAG/ },
+      { name: "large object", error: Object.fromEntries(Array.from({ length: 100 },
+        (_, i) => [`field${i}`, "x".repeat(500)])), expected: /field0.*…$/ },
+      { name: "long string", error: { detail: `${"x".repeat(10_000)}STRING_TAIL` },
+        expected: /detail/, omitted: "STRING_TAIL" },
+      { name: "long array", error: { items: [...Array(100).fill("item"), "ARRAY_TAIL"] },
+        expected: /items/, omitted: "ARRAY_TAIL" },
+      { name: "deep object", error: { a: { b: { c: { d: "DEEP_TAIL" } } } },
+        expected: /a:/, omitted: "DEEP_TAIL" },
+      { name: "long Error", error: new Error(longMessage), expected: longMessage },
+      { name: "message object", error: { message: "readable failure", other: "not a message" },
+        expected: "readable failure" },
+    ];
+    try {
+      if (diagnosticScenario === "delivery") {
+        // Arrange: neither message access, coercion nor inspection can format this value.
+        const unformattable = {
+          get message() { throw new Error("message unavailable"); },
+          get [Symbol.toStringTag]() { throw new Error("inspection unavailable"); },
+          toString() { throw new Error("coercion unavailable"); },
+        };
+        for (const stderrUnavailable of [false, true]) {
+          diagnostics.length = 0;
+          rejectStderr = stderrUnavailable;
+          deliveryFailure = () => { throw unformattable; };
+          // Act
+          const result = await tool.execute("diagnostic-delivery", {
+            agent_type: "codex", task_name: "Diagnostic", prompt: "Finish with delivery failure",
+          }, undefined, undefined, toolContext);
+          const jobId = assertRunningJob(result);
+          await waitFor(() => diagnostics.length > 0, "delivery failure diagnostic");
+          // Assert: failed delivery is removed even if its diagnostic cannot be written.
+          assert.match(diagnostics[0], new RegExp(`Could not deliver subagent job ${jobId}:`));
+          assert.match(diagnostics[0], /Unknown error/);
+          assert.equal(sentMessages.length, 0);
+          await assert.rejects(statusTool.execute("diagnostic-status", { job_id: jobId },
+            undefined, undefined, toolContext), /No active subagent job found/);
+          assert.equal(widgets.at(-1)?.content, undefined);
+        }
+      }
+      if (diagnosticScenario === "roster") {
+        // Arrange: the registered command encounters an upstream Pi API failure.
+        const rosterCommand = commands.find(({ name }) => name === "agentshell-roster");
+        assert.ok(rosterCommand);
+        const notices: Array<{ message: string; type: string }> = [];
+        rosterFailure = () => { throw { code: "ROSTER_UNAVAILABLE", attempt: 3n }; };
+        // Act
+        await rosterCommand.handler("", { ...toolContext, ui: { ...toolContext.ui,
+          notify(message, type) { notices.push({ message, type }); },
+        } });
+        // Assert: this local command failure is not a model message or a stderr report.
+        assert.equal(notices.length, 1);
+        assert.equal(notices[0].type, "error");
+        assert.match(notices[0].message, /^Could not toggle subagent roster: /);
+        assert.match(notices[0].message, /ROSTER_UNAVAILABLE.*3n/);
+        assert.equal(sentMessages.length, 0);
+        assert.equal(diagnostics.length, 0);
+      }
+      if (diagnosticScenario === "background") {
+        // Arrange: the OS subprocess boundary rejects; runner and registry stay real.
+        const opaque = { code: "PROCESS_DOWN",
+          credentials: { apiKey: "SYNTHETIC_NEVER_TO_MODEL" }, cause: circular };
+        let messageReads = 0;
+        const rejections = [
+          { error: new Error(longMessage), expected: longMessage },
+          { error: "worker rejected", expected: "worker rejected" },
+          { error: "", expected: "" },
+          { error: 42, expected: "42" },
+          { error: false, expected: "false" },
+          { error: null, expected: "null" },
+          { error: undefined, expected: "undefined" },
+          { error: 7n, expected: "7" },
+          { error: Symbol("failed"), expected: "Symbol(failed)" },
+          { error: { message: "safe summary", apiKey: "SYNTHETIC_NEVER_TO_MODEL" },
+            expected: "safe summary" },
+          { error: { get message() { messageReads++; return "read once"; } },
+            expected: "read once" },
+          { error: opaque, expected: "Unknown error (no readable message).", local: true },
+          { error: opaque, expected: "Unknown error (no readable message).", local: true,
+            stderrUnavailable: true },
+        ];
+        for (const row of rejections) {
+          diagnostics.length = 0;
+          rejectStderr = row.stderrUnavailable ?? false;
+          const emit = ChildProcess.prototype.emit;
+          const processEvents = mock.method(ChildProcess.prototype, "emit", function (
+            this: ChildProcess, event: string | symbol, ...args: unknown[]
+          ) {
+            if (event === "spawn") {
+              this.kill();
+              return emit.call(this, "error", row.error);
+            }
+            return emit.call(this, event, ...args);
+          });
+          try {
+            const before = sentMessages.length;
+            // Act
+            const result = await tool.execute("diagnostic-background", {
+              agent_type: "codex", task_name: "Diagnostic", prompt: "Fail at process boundary",
+            }, undefined, undefined, toolContext);
+            const jobId = assertRunningJob(result);
+            await waitFor(() => sentMessages.length === before + 1, "background failure");
+            // Assert: only the readable message, never arbitrary fields, reaches the model.
+            const sent = sentMessages.at(-1)!;
+            assert.equal(sent.message.details?.status, "failed");
+            assert.equal(sent.message.content, `Subagent job ${jobId} failed.\n\n${row.expected}`);
+            assert.doesNotMatch(JSON.stringify(sent),
+              /SYNTHETIC_NEVER_TO_MODEL|apiKey|credentials|PROCESS_DOWN/);
+            assert.equal(diagnostics.length, row.local ? 1 : 0);
+            if (row.local) {
+              assert.ok(diagnostics[0].includes(jobId));
+              assert.match(diagnostics[0], /PROCESS_DOWN/);
+              assert.match(diagnostics[0], /SYNTHETIC_NEVER_TO_MODEL/);
+            }
+            await assert.rejects(statusTool.execute("diagnostic-status", { job_id: jobId },
+              undefined, undefined, toolContext), /No active subagent job found/);
+            assert.equal(widgets.at(-1)?.content, undefined);
+          } finally {
+            processEvents.mock.restore();
+          }
+        }
+        assert.equal(messageReads, 1);
+      }
+      if (diagnosticScenario === "widget") for (const row of cases) {
+        diagnostics.length = 0;
+        widgetFailure = () => { widgetFailure = undefined; throw row.error; };
+        const before = sentMessages.length;
+        // Act
+        const result = await tool.execute("diagnostic-widget", {
+          agent_type: "codex", task_name: "Diagnostic", prompt: "Finish despite UI failure",
+        }, undefined, undefined, toolContext);
+        const jobId = assertRunningJob(result);
+        await waitFor(() => sentMessages.length === before + 1, row.name);
+        // Assert: formatting did not replace the worker's success or prevent cleanup.
+        assert.equal(sentMessages.at(-1)?.message.details?.status, "completed", row.name);
+        await assert.rejects(statusTool.execute("diagnostic-status", { job_id: jobId },
+          undefined, undefined, toolContext), /No active subagent job found/);
+        const prefix = "Could not update AgentShell job widget: ";
+        assert.equal(diagnostics.length, 1, row.name);
+        assert.ok(diagnostics[0].startsWith(prefix), row.name);
+        const body = diagnostics[0].slice(prefix.length, -1);
+        if (typeof row.expected === "string") {
+          assert.equal(body, row.expected, row.name);
+        } else {
+          assert.match(body, row.expected, row.name);
+          assert.ok(body.length <= 4_000, row.name);
+          assert.doesNotMatch(body, /[\u0000-\u001f\u007f-\u009f]/, row.name);
+        }
+        if (row.omitted) assert.ok(!body.includes(row.omitted), row.name);
+        assert.equal(hookCalls, 0, row.name);
+      }
+    } finally {
+      stderr.mock.restore();
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      await shutdownHandlers[0]?.({ type: "session_shutdown" }, toolContext);
+    }
+    process.stderr.write("INDEX_DIAGNOSTICS_OK\n");
+    return;
+  }
 
   if (process.env.INDEX_DELIVERY_IDLE_CHECK_TEST === "1") {
     const previousPath = process.env.PATH;

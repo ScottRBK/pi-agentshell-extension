@@ -220,6 +220,36 @@ test("submits subagent jobs and delivers their completions", {
   assert.match(completed.stderr, /INDEX_HARNESS_OK/);
 });
 
+for (const [scenario, description] of [
+  ["widget", "bounds local object diagnostics without interrupting jobs"],
+  ["delivery", "cleans up despite unformattable errors and unavailable stderr"],
+  ["background", "preserves messages but keeps opaque fields out of model input"],
+  ["roster", "reports failures only through a local notification"],
+]) {
+  test(`diagnostics: ${scenario} ${description}`, {
+    timeout: 20_000,
+  }, () => {
+    // Arrange: isolate configuration; the harness uses registered handlers, not private helpers.
+    const agentDirectory = mkdtempSync(join(tmpdir(), "agentshell-diagnostics-"));
+    const env = { ...process.env, PI_CODING_AGENT_DIR: agentDirectory,
+      INDEX_DIAGNOSTICS_TEST: scenario };
+    for (const key of ["PI_AGENT_SHELL_CHILD", "PI_AGENT_SHELL_DEPTH",
+      "PI_AGENT_SHELL_MAX_DEPTH", "PI_AGENTSHELL_ROSTER_FILE"]) delete env[key];
+    try {
+      // Act
+      const completed = spawnSync("pi", [
+        "--mode", "rpc", "--offline", "--no-session", "--no-extensions", "--extension", HARNESS,
+      ], { cwd: ROOT, encoding: "utf8", env,
+        input: '{"type":"get_state"}\n', timeout: 15_000 });
+      // Assert
+      assert.equal(completed.status, 0, completed.stderr);
+      assert.match(completed.stderr, /INDEX_DIAGNOSTICS_OK/);
+    } finally {
+      rmSync(agentDirectory, { recursive: true, force: true });
+    }
+  });
+}
+
 test("defers active-agent completions until settlement", {
   timeout: 15_000,
 }, () => {
