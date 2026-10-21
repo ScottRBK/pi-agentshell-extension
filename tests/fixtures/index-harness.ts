@@ -9,7 +9,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mock } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { inspect } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -436,11 +435,7 @@ export default async function indexHarness(): Promise<void> {
     process.env.PATH = FAKE_BIN;
     const diagnostics: string[] = [];
     let rejectStderr = false;
-    const stderr = mock.method(process.stderr, "write", (chunk: string | Uint8Array) => {
-      diagnostics.push(String(chunk));
-      if (rejectStderr) throw new Error("stderr unavailable");
-      return true;
-    });
+    const stderrWrite = Object.getOwnPropertyDescriptor(process.stderr, "write");
     const circular: Record<string, unknown> = { code: "WIDGET_BROKEN", count: 7n };
     circular.self = circular;
     let hookCalls = 0;
@@ -486,6 +481,12 @@ export default async function indexHarness(): Promise<void> {
         expected: "readable failure" },
     ];
     try {
+      // Plain overrides also work in the standalone Pi runtime, without node:test mocks.
+      process.stderr.write = (chunk: string | Uint8Array) => {
+        diagnostics.push(String(chunk));
+        if (rejectStderr) throw new Error("stderr unavailable");
+        return true;
+      };
       if (diagnosticScenario === "delivery") {
         // Arrange: neither message access, coercion nor inspection can format this value.
         const unformattable = {
@@ -557,16 +558,17 @@ export default async function indexHarness(): Promise<void> {
           diagnostics.length = 0;
           rejectStderr = row.stderrUnavailable ?? false;
           const emit = ChildProcess.prototype.emit;
-          const processEvents = mock.method(ChildProcess.prototype, "emit", function (
-            this: ChildProcess, event: string | symbol, ...args: unknown[]
-          ) {
-            if (event === "spawn") {
-              this.kill();
-              return emit.call(this, "error", row.error);
-            }
-            return emit.call(this, event, ...args);
-          });
+          const emitDescriptor = Object.getOwnPropertyDescriptor(ChildProcess.prototype, "emit");
           try {
+            ChildProcess.prototype.emit = function (
+              this: ChildProcess, event: string | symbol, ...args: unknown[]
+            ) {
+              if (event === "spawn") {
+                this.kill();
+                return emit.call(this, "error", row.error);
+              }
+              return emit.call(this, event, ...args);
+            };
             const before = sentMessages.length;
             // Act
             const result = await tool.execute("diagnostic-background", {
@@ -590,7 +592,11 @@ export default async function indexHarness(): Promise<void> {
               undefined, undefined, toolContext), /No active subagent job found/);
             assert.equal(widgets.at(-1)?.content, undefined);
           } finally {
-            processEvents.mock.restore();
+            if (emitDescriptor) {
+              Object.defineProperty(ChildProcess.prototype, "emit", emitDescriptor);
+            } else {
+              Reflect.deleteProperty(ChildProcess.prototype, "emit");
+            }
           }
         }
         assert.equal(messageReads, 1);
@@ -624,7 +630,8 @@ export default async function indexHarness(): Promise<void> {
         assert.equal(hookCalls, 0, row.name);
       }
     } finally {
-      stderr.mock.restore();
+      if (stderrWrite) Object.defineProperty(process.stderr, "write", stderrWrite);
+      else Reflect.deleteProperty(process.stderr, "write");
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
       await shutdownHandlers[0]?.({ type: "session_shutdown" }, toolContext);

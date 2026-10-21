@@ -236,8 +236,8 @@ for (const [scenario, description] of [
     for (const key of ["PI_AGENT_SHELL_CHILD", "PI_AGENT_SHELL_DEPTH",
       "PI_AGENT_SHELL_MAX_DEPTH", "PI_AGENTSHELL_ROSTER_FILE"]) delete env[key];
     try {
-      // Act
-      const completed = spawnSync("pi", [
+      // Act: PI_BIN selects the pinned standalone runtime without changing PATH.
+      const completed = spawnSync(process.env.PI_BIN ?? "pi", [
         "--mode", "rpc", "--offline", "--no-session", "--no-extensions", "--extension", HARNESS,
       ], { cwd: ROOT, encoding: "utf8", env,
         input: '{"type":"get_state"}\n', timeout: 15_000 });
