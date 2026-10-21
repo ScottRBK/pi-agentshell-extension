@@ -53,6 +53,64 @@ function report(result: any) {
   return JSON.parse(text.slice(0, text.lastIndexOf("\n\nSession ID:")));
 }
 
+async function checkValidationOrder(): Promise<void> {
+  // Arrange: several invalid settings compete; only the first failure is observable.
+  const { tools, messages } = await load();
+  const missing = join(root, "missing.json");
+  const cases: Array<[object, RegExp]> = [
+    [{ resume_session_id: "job-invalid", roster_entry: "unknown" }, /native Session ID/],
+    [{ resume_session_id: "unrecorded", roster_entry: "unknown" }, /No recorded launch/],
+    [{ agent_type: "codex", roster_entry: "unknown", roster_file: missing },
+      /Unknown roster entry/],
+    [{ agent_type: "codex", roster_file: missing, resources: { skills: [missing] } },
+      /roster_file is supported only/],
+    [{ roster_entry: "owner", model: "conflict", resources: { skills: [missing] } },
+      /Manual model conflicts/],
+    [{ agent_type: "pi", resources: { skills: [missing] }, roster_file: missing },
+      /resources.skills/],
+    [{ roster_file: missing }, /roster_file is supported only/],
+    [{ agent_type: "pi", roster_file: missing }, /Invalid AgentShell configuration/],
+  ];
+  // Act / Assert: both direct and queued modes reject without a worker or follow-up.
+  for (const mode of ["json", "rpc"] as const) {
+    for (const [params, expected] of cases) {
+      await assert.rejects(launch(tools, params, mode), expected);
+      assert.equal(existsSync(started), false);
+      assert.equal(messages.length, 0);
+    }
+  }
+}
+
+async function checkAmbiguousResume(): Promise<void> {
+  // Arrange: native IDs belong to a harness, not to the background job registry.
+  const fakeCodex = join(root, "bin/codex");
+  copyFileSync(fileURLToPath(new URL("roster-codex.py", import.meta.url)), fakeCodex);
+  chmodSync(fakeCodex, 0o755);
+  const initial = await load();
+  const first = await launch(initial.tools, { roster_entry: "owner" });
+  const details = first.details;
+  assert.ok(typeof details === "object" && details !== null);
+  assert.ok("sessionId" in details && typeof details.sessionId === "string");
+  const sessionId = details.sessionId;
+  process.env.ROSTER_SESSION_ID = sessionId;
+  await launch(initial.tools, { agent_type: "codex", model: "codex-model" });
+  const { tools, messages } = await load();
+  rmSync(started);
+  // Act / Assert: ambiguity takes precedence over later selection validation.
+  for (const agent_type of [undefined, "unsupported"]) {
+    await assert.rejects(launch(tools, { agent_type, resume_session_id: sessionId,
+      roster_entry: "unknown" }), /Ambiguous native session ID; specify the original agent_type/);
+    assert.equal(existsSync(started), false);
+    assert.equal(messages.length, 0);
+  }
+  const pi = report(await launch(tools, { agent_type: "pi", resume_session_id: sessionId }));
+  const codex = report(await launch(tools, { agent_type: "codex", resume_session_id: sessionId }));
+  assert.ok(pi.args.includes("test-model"));
+  assert.equal(pi.cwd, join(root, "role/work"));
+  assert.ok(codex.args.includes("codex-model"));
+  assert.ok(codex.args.includes(sessionId));
+}
+
 export default async function rosterLaunchHarness(): Promise<void> {
   const original = { ...process.env };
   try {
@@ -67,6 +125,16 @@ export default async function rosterLaunchHarness(): Promise<void> {
     process.env.PATH = join(root, "bin");
     process.env.PI_AGENTSHELL_ROSTER_FILE = rosterPath;
     process.env.ROSTER_STARTED = started;
+    if (process.env.ROSTER_SCENARIO === "validation-order") {
+      await checkValidationOrder();
+      process.stderr.write("ROSTER_LAUNCH_OK\n");
+      return;
+    }
+    if (process.env.ROSTER_SCENARIO === "ambiguous-resume") {
+      await checkAmbiguousResume();
+      process.stderr.write("ROSTER_LAUNCH_OK\n");
+      return;
+    }
     if (process.env.ROSTER_SCENARIO === "null-roster-schema") {
       // Arrange: inspect the actual schema exposed to callers, without coercion.
       const { tools } = await load();

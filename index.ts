@@ -9,7 +9,7 @@ import {
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 
 import {
   loadAgentShellConfig,
@@ -102,6 +102,28 @@ interface PendingTerminalMessage {
   output: string;
   warnings: string[];
   silent: boolean;
+}
+
+interface TerminalDeliveryState {
+  deliveries: Map<string, TerminalJobStatus>;
+  pendingMessages: PendingTerminalMessage[];
+  isParentAgentActive: () => boolean;
+  isShuttingDown: () => boolean;
+}
+
+interface SubagentRuntime {
+  limits: AgentShellLimits;
+  interactiveConfig: AgentShellInteractiveConfig;
+  modelDiscoverySupported: boolean;
+  interactiveSupported: boolean;
+  delegation: AgentShellDelegation;
+}
+
+interface LaunchSelectionState {
+  getRoster: () => AgentShellRosterConfig;
+  rosterSource: string;
+  savedLaunches: Map<string, SavedLaunch>;
+  retainedLaunches: Set<string>;
 }
 
 interface InteractiveLaunchSettings {
@@ -574,12 +596,10 @@ function sendTerminalMessage(
   pi: ExtensionAPI,
   jobs: JobRegistry,
   message: PendingTerminalMessage,
-  isShuttingDown: () => boolean,
-  isParentAgentActive: () => boolean,
-  deliveries: Map<string, TerminalJobStatus>,
-  pendingMessages: PendingTerminalMessage[],
+  delivery: TerminalDeliveryState,
   onWidgetChange: () => void,
 ): void {
+  const { isShuttingDown, isParentAgentActive, deliveries, pendingMessages } = delivery;
   if (isShuttingDown() || jobs.get(message.jobId) === undefined) {
     jobs.remove(message.jobId);
     return;
@@ -808,24 +828,323 @@ function registerSubagentStatusTool(
   });
 }
 
+function createSubagentParameters(agentTypes: string[]) {
+  return Type.Object({
+    agent_type: Type.Optional(StringEnum(agentTypes, {
+      description: "Harness; required unless roster_entry or a known resume is used",
+    })),
+    roster_entry: Type.Optional(Type.String({
+      minLength: 1,
+      description: "Name from subagent_roster. Conflicting manual launch settings are rejected.",
+    })),
+    roster_file: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+      description: "Pi-only child roster file; relative to effective cwd for ad-hoc calls. " +
+        "If no child roster file is wanted, omit this field or pass null. " +
+        "For non-Pi agents, always omit it or pass null. Do not use placeholder strings.",
+    })),
+    resources: Type.Optional(Type.Union([Type.Object({
+      skills: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+      plugins: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+      extensions: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+      packages: Type.Optional(Type.Array(Type.String(), { maxItems: 0 })),
+      mcp_servers: Type.Optional(Type.Union([
+        Type.Null(), Type.Array(Type.String(), { maxItems: 0 }),
+      ])),
+      inherit_personal_resources: Type.Optional(Type.Boolean()),
+      inherit_project_resources: Type.Optional(Type.Boolean()),
+      include_instruction_files: Type.Optional(Type.Boolean()),
+      include_home_system_prompt: Type.Optional(Type.Boolean()),
+    }, { additionalProperties: false }), Type.Null()], {
+      description: "Local resource paths and discovery controls; paths are relative to cwd. " +
+        "Omit this field or pass null when not supplying a manual resource selection. " +
+        "Provision files first. Unsupported selections fail; resources stay fixed on resume.",
+    })),
+    task_name: Type.String({
+      minLength: 1,
+      maxLength: 40,
+      description:
+        "Short human-readable name for this delegated task, " +
+        "such as Code review or QA check",
+    }),
+    cwd: Type.Optional(Type.String({
+      minLength: 1,
+      description:
+        "Working directory for the subagent. " +
+        "Defaults to Pi's current working directory.",
+    })),
+    prompt: Type.String({
+      description: "Task for the subagent",
+    }),
+    model: Type.Optional(Type.String({
+      minLength: 1,
+      description: "Model identifier passed to AgentShell",
+    })),
+    effort: Type.Optional(Type.String({
+      minLength: 1,
+      description: "Reasoning effort passed to AgentShell",
+    })),
+    resume_session_id: Type.Optional(Type.Union(
+      [
+        Type.String({ minLength: 1 }),
+        Type.Null(),
+      ],
+      { description: RESUME_SESSION_GUIDANCE },
+    )),
+    auto_approve: Type.Optional(Type.Boolean({
+      description:
+        "Allow the subagent to approve tool use automatically. " +
+        "Defaults to false on every call, including resumes. Interactive runs use " +
+        "the agent's native permission prompts.",
+    })),
+    allowed_tools: Type.Optional(Type.Array(
+      Type.String({ minLength: 1 }),
+      {
+        minItems: 1,
+        description:
+          "Tool names the subagent may use for headless runs, when " +
+          "supported. Applies only to this call; omit for no explicit list. " +
+          "Interactive runs use native permission controls " +
+          "and reject unsupported options.",
+      },
+    )),
+    disallowed_tools: Type.Optional(Type.Array(
+      Type.String({ minLength: 1 }),
+      {
+        minItems: 1,
+        description:
+          "Tool names the subagent must not use for headless runs, when " +
+          "supported. Applies only to this call; omit for no explicit list. " +
+          "Interactive runs use native permission controls " +
+          "and reject unsupported options.",
+      },
+    )),
+    interactive: Type.Optional(Type.Boolean({
+      description:
+        "Run the agent's native interactive UI in a neighbouring tmux " +
+        "pane. Requires TMUX and TMUX_PANE. Defaults to the configured " +
+        "interactive.enabled value.",
+    })),
+    stay_open: Type.Optional(Type.Boolean({
+      description:
+        "Keep an interactive pane open after its result is delivered. " +
+        "Applies only to interactive runs and defaults to the configured " +
+        "interactive.stay_open value.",
+    })),
+    inactivity_timeout: Type.Optional(Type.Number({
+      exclusiveMinimum: 0,
+      description:
+        "Positive number of seconds used to infer completion after an " +
+        "inactive interactive pane when inactivity is enabled. Defaults " +
+        "to the configured interactive.inactivity_timeout value.",
+    })),
+    inactivity_enabled: Type.Optional(Type.Boolean({
+      description:
+        "Enable automatic closure after inactivity_timeout for interactive " +
+        "runs. Defaults to the configured interactive.inactivity_enabled " +
+        "value.",
+    })),
+  });
+}
+
+type SubagentInput = Static<ReturnType<typeof createSubagentParameters>>;
+type SubagentParams = ReturnType<typeof normalizeLaunchInput>;
+type LaunchSelection = Omit<SavedLaunch, "version" | "sessionId">;
+
+function normalizeLaunchInput(input: SubagentInput) {
+  // Drop null before restoring saved settings: null means omitted, not cleared.
+  const { roster_file, resources, ...provided } = input;
+  return { ...provided,
+    ...(roster_file == null ? {} : { roster_file }),
+    ...(resources == null ? {} : { resources }) };
+}
+
+function findSavedLaunch(
+  params: SubagentParams,
+  launches: LaunchSelectionState,
+): SavedLaunch | undefined {
+  const { savedLaunches, retainedLaunches } = launches;
+  if (params.resume_session_id === "new" || params.resume_session_id?.startsWith("job-")) {
+    throw new Error(`Use a returned native Session ID. ${RESUME_SESSION_GUIDANCE}`);
+  }
+  const candidates = params.resume_session_id ? [...savedLaunches.values()]
+    .filter((entry) => entry.sessionId === params.resume_session_id) : [];
+  const saved = candidates.length === 1 ? candidates[0]
+    : candidates.find((entry) => entry.request.agent_type === params.agent_type);
+  if (candidates.length && !saved) {
+    throw new Error("Ambiguous native session ID; specify the original agent_type");
+  }
+  const resumeKey = saved ? launchKey(saved)
+    : JSON.stringify([params.agent_type, params.resume_session_id]);
+  if (params.resume_session_id && retainedLaunches.has(resumeKey)) {
+    throw new Error("This retained interactive session may still be running. "
+      + "Shut down or reload its owning Pi session before resuming it here.");
+  }
+  if (params.resume_session_id && !saved && (params.roster_entry !== undefined
+    || params.resources !== undefined || params.roster_file !== undefined)) {
+    throw new Error("No recorded launch; cannot verify this session's original selection");
+  }
+  return saved;
+}
+
+function restoreLaunchDefaults(
+  params: SubagentParams,
+  saved: SavedLaunch | undefined,
+): SubagentParams {
+  if (!saved) return params;
+  if (params.roster_entry !== undefined && params.roster_entry !== saved.role?.name) {
+    throw new Error("Resume requires the original roster entry");
+  }
+  // Restore launch defaults, but approval/tool controls belong only to this call.
+  return { ...saved.request, ...params,
+    auto_approve: params.auto_approve,
+    allowed_tools: params.allowed_tools,
+    disallowed_tools: params.disallowed_tools,
+    roster_entry: params.roster_entry ?? saved.role?.name };
+}
+
+function selectRosterRole(
+  params: SubagentParams,
+  roster: AgentShellRosterConfig,
+  saved: SavedLaunch | undefined,
+): AgentShellRosterRole | undefined {
+  const role = params.roster_entry === undefined ? undefined
+    : roster.roles.find((entry) => entry.name === params.roster_entry);
+  if (params.roster_entry !== undefined && !roster.enabled) {
+    throw new Error(saved?.role
+      ? `Original roster entry "${saved.role.name}" is now disabled; re-enable its roster.`
+      : `Roster is disabled; cannot select entry "${params.roster_entry}".`);
+  }
+  if (params.roster_entry !== undefined && role === undefined) {
+    throw new Error(`Unknown roster entry "${params.roster_entry}"`);
+  }
+  if ((role?.agent_type ?? params.agent_type) !== "pi"
+    && (role?.roster_file !== undefined || params.roster_file !== undefined)) {
+    throw new Error('roster_file is supported only for agent_type "pi"');
+  }
+  if (saved?.role && !isDeepStrictEqual(role, saved.role)) {
+    const changed = (["name", "description", "agent_type", "model", "effort", "cwd",
+      "resources", "roster_file"] as const)
+      .filter((key) => !isDeepStrictEqual(role?.[key], saved.role?.[key]));
+    throw new Error(`Original roster_entry changed: ${changed.join(", ")}`);
+  }
+  return role;
+}
+
+function resolveSelectedSettings(
+  params: SubagentParams,
+  role: AgentShellRosterRole | undefined,
+  parentCwd: string,
+) {
+  for (const key of ["agent_type", "model", "effort", "cwd"] as const) {
+    if (role?.[key] !== undefined && params[key] !== undefined && params[key] !== role[key]) {
+      throw new Error(`Manual ${key} conflicts with roster entry "${role.name}"`);
+    }
+  }
+  const cwd = role?.cwd ?? params.cwd ?? parentCwd;
+  const manualResources = params.resources === undefined ? undefined
+    : resolveSessionResources(params.resources, cwd);
+  const manualRosterFile = params.roster_file === undefined ? undefined
+    : resolve(cwd, params.roster_file);
+  for (const [key, manual, selected] of [
+    ["resources", manualResources, role?.resources],
+    ["roster_file", manualRosterFile, role?.roster_file],
+  ] as const) {
+    if (role && manual !== undefined && !isDeepStrictEqual(manual, selected)) {
+      throw new Error(`Manual ${key} conflicts with roster entry "${role.name}"`);
+    }
+  }
+  return { ...params, ...role,
+    resources: role?.resources ?? manualResources,
+    roster_file: role?.roster_file ?? manualRosterFile };
+}
+
+function validateResumeSelection(
+  saved: SavedLaunch | undefined,
+  selection: LaunchSelection,
+): void {
+  if (saved && (saved.role || saved.request.resources || saved.request.roster_file
+    || selection.request.resources || selection.request.roster_file)) {
+    // Only the selected role/resources form a resume contract. Model/effort on ad-hoc
+    // calls and approval/tool/interactive controls remain explicit per-call choices.
+    const changed: string[] = (["agent_type", "cwd", "resources", "roster_file"] as const)
+      .filter((key) => !isDeepStrictEqual(selection.request[key], saved.request[key]));
+    if (selection.rosterSource !== saved.rosterSource) changed.push("roster source");
+    if (!isDeepStrictEqual(selection.childRoster, saved.childRoster)) {
+      changed.push("roster_file contents");
+    }
+    if (changed.length) {
+      throw new Error(`Resume conflicts with original selection: ${changed.join(", ")}`);
+    }
+  }
+}
+
+function prepareSubagentLaunch(
+  provided: SubagentParams,
+  parentCwd: string,
+  runtime: SubagentRuntime,
+  launches: LaunchSelectionState,
+  agentTypes: string[],
+): { request: AgentRequest; selection: LaunchSelection; taskName: string } {
+  const saved = findSavedLaunch(provided, launches);
+  let params = restoreLaunchDefaults(provided, saved);
+  const { interactiveConfig, interactiveSupported } = runtime;
+  const { getRoster, rosterSource } = launches;
+  const interactive = resolveInteractiveLaunchSettings(
+    params,
+    interactiveConfig,
+  );
+
+  if (interactive.interactive && !interactiveSupported) {
+    throw new Error([
+      "Interactive AgentShell runs need an updated runtime.",
+      `Run: ${agentShellSetupCommand()}`,
+      "Then restart Pi or run /reload.",
+    ].join("\n"));
+  }
+
+  if (params.cwd !== undefined) params = { ...params, cwd: resolve(parentCwd, params.cwd) };
+  const roster = getRoster();
+  const role = selectRosterRole(params, roster, saved);
+  const effective = resolveSelectedSettings(params, role, parentCwd);
+  const childRoster = effective.roster_file === undefined ? undefined
+    : loadAgentShellRosterFile(effective.roster_file);
+  if (!effective.agent_type || !agentTypes.includes(effective.agent_type)) {
+    throw new Error("Provide a supported agent_type or roster_entry");
+  }
+  const request: AgentRequest = {
+    agent_type: effective.agent_type,
+    cwd: effective.cwd ?? parentCwd,
+    prompt: params.prompt,
+    model: effective.model,
+    effort: effective.effort,
+    roster_file: effective.roster_file,
+    resources: effective.resources,
+    session_id: params.resume_session_id ?? undefined,
+    auto_approve: params.auto_approve,
+    allowed_tools: params.allowed_tools,
+    disallowed_tools: params.disallowed_tools,
+    ...interactive,
+  };
+
+  const { prompt: _prompt, session_id: _sessionId, ...settings } = request;
+  const selection = jsonSnapshot({
+    request: { ...settings, auto_approve: settings.auto_approve ?? false }, role, childRoster,
+    rosterSource: role ? rosterSource : undefined });
+  validateResumeSelection(saved, selection);
+  return { request, selection, taskName: params.task_name };
+}
+
 async function registerSubagentTool(
   pi: ExtensionAPI,
-  limits: AgentShellLimits,
-  interactiveConfig: AgentShellInteractiveConfig,
+  runtime: SubagentRuntime,
   jobs: JobRegistry,
-  deliveries: Map<string, TerminalJobStatus>,
-  pendingMessages: PendingTerminalMessage[],
-  isParentAgentActive: () => boolean,
+  delivery: TerminalDeliveryState,
+  launches: LaunchSelectionState,
   isSilentMode: () => boolean,
-  isShuttingDown: () => boolean,
-  modelDiscoverySupported: boolean,
-  interactiveSupported: boolean,
-  getRoster: () => AgentShellRosterConfig,
-  rosterSource: string,
-  savedLaunches: Map<string, SavedLaunch>,
-  retainedLaunches: Set<string>,
-  delegation: AgentShellDelegation,
 ): Promise<(enabled: boolean) => void> {
+  const { limits, modelDiscoverySupported, delegation } = runtime;
+  const { deliveries, isShuttingDown } = delivery;
+  const { getRoster, savedLaunches, retainedLaunches } = launches;
   const agentTypes = await getSupportedAgentTypes(limits);
 
   registerJobMessageRenderer(pi);
@@ -853,121 +1172,7 @@ async function registerSubagentTool(
         "Pass roster_entry by name to apply that child's launch settings.",
       ] : []),
     ].join(" "),
-    parameters: Type.Object({
-      agent_type: Type.Optional(StringEnum(agentTypes, {
-        description: "Harness; required unless roster_entry or a known resume is used",
-      })),
-      roster_entry: Type.Optional(Type.String({
-        minLength: 1,
-        description: "Name from subagent_roster. Conflicting manual launch settings are rejected.",
-      })),
-      roster_file: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
-        description: "Pi-only child roster file; relative to effective cwd for ad-hoc calls. " +
-          "If no child roster file is wanted, omit this field or pass null. " +
-          "For non-Pi agents, always omit it or pass null. Do not use placeholder strings.",
-      })),
-      resources: Type.Optional(Type.Union([Type.Object({
-        skills: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-        plugins: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-        extensions: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
-        packages: Type.Optional(Type.Array(Type.String(), { maxItems: 0 })),
-        mcp_servers: Type.Optional(Type.Union([
-          Type.Null(), Type.Array(Type.String(), { maxItems: 0 }),
-        ])),
-        inherit_personal_resources: Type.Optional(Type.Boolean()),
-        inherit_project_resources: Type.Optional(Type.Boolean()),
-        include_instruction_files: Type.Optional(Type.Boolean()),
-        include_home_system_prompt: Type.Optional(Type.Boolean()),
-      }, { additionalProperties: false }), Type.Null()], {
-        description: "Local resource paths and discovery controls; paths are relative to cwd. " +
-          "Omit this field or pass null when not supplying a manual resource selection. " +
-          "Provision files first. Unsupported selections fail; resources stay fixed on resume.",
-      })),
-      task_name: Type.String({
-        minLength: 1,
-        maxLength: 40,
-        description:
-          "Short human-readable name for this delegated task, " +
-          "such as Code review or QA check",
-      }),
-      cwd: Type.Optional(Type.String({
-        minLength: 1,
-        description:
-          "Working directory for the subagent. " +
-          "Defaults to Pi's current working directory.",
-      })),
-      prompt: Type.String({
-        description: "Task for the subagent",
-      }),
-      model: Type.Optional(Type.String({
-        minLength: 1,
-        description: "Model identifier passed to AgentShell",
-      })),
-      effort: Type.Optional(Type.String({
-        minLength: 1,
-        description: "Reasoning effort passed to AgentShell",
-      })),
-      resume_session_id: Type.Optional(Type.Union(
-        [
-          Type.String({ minLength: 1 }),
-          Type.Null(),
-        ],
-        { description: RESUME_SESSION_GUIDANCE },
-      )),
-      auto_approve: Type.Optional(Type.Boolean({
-        description:
-          "Allow the subagent to approve tool use automatically. " +
-          "Defaults to false on every call, including resumes. Interactive runs use " +
-          "the agent's native permission prompts.",
-      })),
-      allowed_tools: Type.Optional(Type.Array(
-        Type.String({ minLength: 1 }),
-        {
-          minItems: 1,
-          description:
-            "Tool names the subagent may use for headless runs, when " +
-            "supported. Applies only to this call; omit for no explicit list. " +
-            "Interactive runs use native permission controls " +
-            "and reject unsupported options.",
-        },
-      )),
-      disallowed_tools: Type.Optional(Type.Array(
-        Type.String({ minLength: 1 }),
-        {
-          minItems: 1,
-          description:
-            "Tool names the subagent must not use for headless runs, when " +
-            "supported. Applies only to this call; omit for no explicit list. " +
-            "Interactive runs use native permission controls " +
-            "and reject unsupported options.",
-        },
-      )),
-      interactive: Type.Optional(Type.Boolean({
-        description:
-          "Run the agent's native interactive UI in a neighbouring tmux " +
-          "pane. Requires TMUX and TMUX_PANE. Defaults to the configured " +
-          "interactive.enabled value.",
-      })),
-      stay_open: Type.Optional(Type.Boolean({
-        description:
-          "Keep an interactive pane open after its result is delivered. " +
-          "Applies only to interactive runs and defaults to the configured " +
-          "interactive.stay_open value.",
-      })),
-      inactivity_timeout: Type.Optional(Type.Number({
-        exclusiveMinimum: 0,
-        description:
-          "Positive number of seconds used to infer completion after an " +
-          "inactive interactive pane when inactivity is enabled. Defaults " +
-          "to the configured interactive.inactivity_timeout value.",
-      })),
-      inactivity_enabled: Type.Optional(Type.Boolean({
-        description:
-          "Enable automatic closure after inactivity_timeout for interactive " +
-          "runs. Defaults to the configured interactive.inactivity_enabled " +
-          "value.",
-      })),
-    }),
+    parameters: createSubagentParameters(agentTypes),
 
     renderCall(args, theme) {
       let text =
@@ -996,137 +1201,11 @@ async function registerSubagentTool(
     },
 
     async execute(_toolCallId, input, toolSignal, _onUpdate, ctx) {
-      // Drop null before restoring saved settings: null means omitted, not cleared.
-      const { roster_file, resources, ...provided } = input;
-      let params = { ...provided,
-        ...(roster_file == null ? {} : { roster_file }),
-        ...(resources == null ? {} : { resources }) };
+      const params = normalizeLaunchInput(input);
       const silent = isSilentMode();
-      if (params.resume_session_id === "new" || params.resume_session_id?.startsWith("job-")) {
-        throw new Error(`Use a returned native Session ID. ${RESUME_SESSION_GUIDANCE}`);
-      }
-      const candidates = params.resume_session_id ? [...savedLaunches.values()]
-        .filter((entry) => entry.sessionId === params.resume_session_id) : [];
-      const saved = candidates.length === 1 ? candidates[0]
-        : candidates.find((entry) => entry.request.agent_type === params.agent_type);
-      if (candidates.length && !saved) {
-        throw new Error("Ambiguous native session ID; specify the original agent_type");
-      }
-      const resumeKey = saved ? launchKey(saved)
-        : JSON.stringify([params.agent_type, params.resume_session_id]);
-      if (params.resume_session_id && retainedLaunches.has(resumeKey)) {
-        throw new Error("This retained interactive session may still be running. "
-          + "Shut down or reload its owning Pi session before resuming it here.");
-      }
-      if (params.resume_session_id && !saved && (params.roster_entry !== undefined
-        || params.resources !== undefined || params.roster_file !== undefined)) {
-        throw new Error("No recorded launch; cannot verify this session's original selection");
-      }
-      if (saved) {
-        if (params.roster_entry !== undefined && params.roster_entry !== saved.role?.name) {
-          throw new Error("Resume requires the original roster entry");
-        }
-        // Restore launch defaults, but approval/tool controls belong only to this call.
-        params = { ...saved.request, ...params,
-          auto_approve: params.auto_approve,
-          allowed_tools: params.allowed_tools,
-          disallowed_tools: params.disallowed_tools,
-          roster_entry: params.roster_entry ?? saved.role?.name };
-      }
-      const interactive = resolveInteractiveLaunchSettings(
-        params,
-        interactiveConfig,
+      const { request, selection, taskName } = prepareSubagentLaunch(
+        params, ctx.cwd, runtime, launches, agentTypes,
       );
-
-      if (interactive.interactive && !interactiveSupported) {
-        throw new Error([
-          "Interactive AgentShell runs need an updated runtime.",
-          `Run: ${agentShellSetupCommand()}`,
-          "Then restart Pi or run /reload.",
-        ].join("\n"));
-      }
-
-      if (params.cwd !== undefined) params = { ...params, cwd: resolve(ctx.cwd, params.cwd) };
-      const roster = getRoster();
-      const role = params.roster_entry === undefined ? undefined
-        : roster.roles.find((entry) => entry.name === params.roster_entry);
-      if (params.roster_entry !== undefined && !roster.enabled) {
-        throw new Error(saved?.role
-          ? `Original roster entry "${saved.role.name}" is now disabled; re-enable its roster.`
-          : `Roster is disabled; cannot select entry "${params.roster_entry}".`);
-      }
-      if (params.roster_entry !== undefined && role === undefined) {
-        throw new Error(`Unknown roster entry "${params.roster_entry}"`);
-      }
-      if ((role?.agent_type ?? params.agent_type) !== "pi"
-        && (role?.roster_file !== undefined || params.roster_file !== undefined)) {
-        throw new Error('roster_file is supported only for agent_type "pi"');
-      }
-      if (saved?.role && !isDeepStrictEqual(role, saved.role)) {
-        const changed = (["name", "description", "agent_type", "model", "effort", "cwd",
-          "resources", "roster_file"] as const)
-          .filter((key) => !isDeepStrictEqual(role?.[key], saved.role?.[key]));
-        throw new Error(`Original roster_entry changed: ${changed.join(", ")}`);
-      }
-      for (const key of ["agent_type", "model", "effort", "cwd"] as const) {
-        if (role?.[key] !== undefined && params[key] !== undefined && params[key] !== role[key]) {
-          throw new Error(`Manual ${key} conflicts with roster entry "${role.name}"`);
-        }
-      }
-      const cwd = role?.cwd ?? params.cwd ?? ctx.cwd;
-      const manualResources = params.resources === undefined ? undefined
-        : resolveSessionResources(params.resources, cwd);
-      const manualRosterFile = params.roster_file === undefined ? undefined
-        : resolve(cwd, params.roster_file);
-      for (const [key, manual, selected] of [
-        ["resources", manualResources, role?.resources],
-        ["roster_file", manualRosterFile, role?.roster_file],
-      ] as const) {
-        if (role && manual !== undefined && !isDeepStrictEqual(manual, selected)) {
-          throw new Error(`Manual ${key} conflicts with roster entry "${role.name}"`);
-        }
-      }
-      const effective = { ...params, ...role,
-        resources: role?.resources ?? manualResources,
-        roster_file: role?.roster_file ?? manualRosterFile };
-      const childRoster = effective.roster_file === undefined ? undefined
-        : loadAgentShellRosterFile(effective.roster_file);
-      if (!effective.agent_type || !agentTypes.includes(effective.agent_type)) {
-        throw new Error("Provide a supported agent_type or roster_entry");
-      }
-      const request = {
-        agent_type: effective.agent_type,
-        cwd: effective.cwd ?? ctx.cwd,
-        prompt: params.prompt,
-        model: effective.model,
-        effort: effective.effort,
-        roster_file: effective.roster_file,
-        resources: effective.resources,
-        session_id: params.resume_session_id ?? undefined,
-        auto_approve: params.auto_approve,
-        allowed_tools: params.allowed_tools,
-        disallowed_tools: params.disallowed_tools,
-        ...interactive,
-      };
-
-      const { prompt: _prompt, session_id: _sessionId, ...settings } = request;
-      const selection = jsonSnapshot({
-        request: { ...settings, auto_approve: settings.auto_approve ?? false }, role, childRoster,
-        rosterSource: role ? rosterSource : undefined });
-      if (saved && (saved.role || saved.request.resources || saved.request.roster_file
-        || selection.request.resources || selection.request.roster_file)) {
-        // Only the selected role/resources form a resume contract. Model/effort on ad-hoc
-        // calls and approval/tool/interactive controls remain explicit per-call choices.
-        const changed: string[] = (["agent_type", "cwd", "resources", "roster_file"] as const)
-          .filter((key) => !isDeepStrictEqual(selection.request[key], saved.request[key]));
-        if (selection.rosterSource !== saved.rosterSource) changed.push("roster source");
-        if (!isDeepStrictEqual(selection.childRoster, saved.childRoster)) {
-          changed.push("roster_file contents");
-        }
-        if (changed.length) {
-          throw new Error(`Resume conflicts with original selection: ${changed.join(", ")}`);
-        }
-      }
       const remember = (result: RunResult): void => {
         if (!result.details.sessionId || isShuttingDown()) return;
         const launch: SavedLaunch = {
@@ -1162,7 +1241,7 @@ async function registerSubagentTool(
             delegation,
           ),
         {
-          taskName: params.task_name,
+          taskName,
           agentType: request.agent_type,
           model: request.model,
           effort: request.effort,
@@ -1191,10 +1270,7 @@ async function registerSubagentTool(
               warnings: result.details.warnings,
               silent,
             },
-            isShuttingDown,
-            isParentAgentActive,
-            deliveries,
-            pendingMessages,
+            delivery,
             () => safelyUpdateJobWidget(ctx, jobs, deliveries),
           );
         },
@@ -1217,10 +1293,7 @@ async function registerSubagentTool(
               warnings: [],
               silent,
             },
-            isShuttingDown,
-            isParentAgentActive,
-            deliveries,
-            pendingMessages,
+            delivery,
             () => safelyUpdateJobWidget(ctx, jobs, deliveries),
           );
         },
@@ -1504,24 +1577,32 @@ export default async function subagentsExtension(
     },
   });
 
+  const delivery: TerminalDeliveryState = {
+    deliveries,
+    pendingMessages,
+    isParentAgentActive: () => parentAgentActive,
+    isShuttingDown: () => shuttingDown,
+  };
+  const launches: LaunchSelectionState = {
+    getRoster: () => config.roster,
+    rosterSource,
+    savedLaunches,
+    retainedLaunches,
+  };
   const registerTool = async (): Promise<void> => {
     refreshSubagentTool = await registerSubagentTool(
       pi,
-      limits,
-      config.interactive,
+      {
+        limits,
+        interactiveConfig: config.interactive,
+        modelDiscoverySupported: supportsAgentShellModelDiscovery(),
+        interactiveSupported: supportsAgentShellInteractive(),
+        delegation,
+      },
       jobs,
-      deliveries,
-      pendingMessages,
-      () => parentAgentActive,
+      delivery,
+      launches,
       () => silentMode,
-      () => shuttingDown,
-      supportsAgentShellModelDiscovery(),
-      supportsAgentShellInteractive(),
-      () => config.roster,
-      rosterSource,
-      savedLaunches,
-      retainedLaunches,
-      delegation,
     );
   };
 
@@ -1530,21 +1611,17 @@ export default async function subagentsExtension(
     const interactiveSupported = supportsAgentShellInteractive();
     refreshSubagentTool = await registerSubagentTool(
       pi,
-      limits,
-      config.interactive,
+      {
+        limits,
+        interactiveConfig: config.interactive,
+        modelDiscoverySupported,
+        interactiveSupported,
+        delegation,
+      },
       jobs,
-      deliveries,
-      pendingMessages,
-      () => parentAgentActive,
+      delivery,
+      launches,
       () => silentMode,
-      () => shuttingDown,
-      modelDiscoverySupported,
-      interactiveSupported,
-      () => config.roster,
-      rosterSource,
-      savedLaunches,
-      retainedLaunches,
-      delegation,
     );
 
     if (

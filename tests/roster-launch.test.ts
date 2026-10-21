@@ -47,6 +47,14 @@ test("launches a named roster entry and rejects unknown or conflicting settings"
   runHarness("named");
 });
 
+test("launch validation preserves the first error without starting a worker", () => {
+  runHarness("validation-order");
+});
+
+test("matching native session IDs require their original harness to select saved defaults", () => {
+  runHarness("ambiguous-resume");
+});
+
 test("non-Pi named/ad-hoc calls reject child rosters before jobs or native launch", () => {
   runHarness("nonpi");
 });
