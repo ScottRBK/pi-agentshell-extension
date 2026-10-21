@@ -268,13 +268,14 @@ async def run_interactive(
             allowed_tools=allowed_tools,
             **session_resources(request),
         )
-        return await observe_interactive(
+        await observe_interactive(
             session,
             stay_open=stay_open,
             inactivity_enabled=inactivity_enabled,
             inactivity_timeout=inactivity_timeout,
             codex_capture_only=agent_type == AgentType.CODEX,
         )
+        return 0
     finally:
         if session is not None:
             with contextlib.suppress(BaseException):
@@ -343,43 +344,208 @@ async def observe_interactive(
     inactivity_enabled: bool,
     inactivity_timeout: float,
     codex_capture_only: bool = False,
-) -> int:
-    events = session.events().__aiter__()
-    event_task = asyncio.create_task(anext(events))
-    screen_task = asyncio.create_task(session.terminal.capture_screen())
-    eof_task = asyncio.create_task(wait_for_stdin_eof())
-    tasks = {event_task, screen_task, eof_task}
-    last_activity = asyncio.get_running_loop().time()
-    last_screen_key: str | None = None
-    latest_screen = ""
-    structured_text = False
+) -> None:
+    monitor = _InteractiveMonitor(
+        session,
+        stay_open=stay_open,
+        inactivity_enabled=inactivity_enabled,
+        inactivity_timeout=inactivity_timeout,
+        codex_capture_only=codex_capture_only,
+    )
+    await monitor.observe()
 
-    async def deliver_complete() -> None:
-        if not stay_open and not session.terminal.closed:
-            await session.close()
+
+class _InteractiveMonitor:
+    """Own the observations and activity state for one interactive turn."""
+
+    def __init__(
+        self,
+        session,
+        *,
+        stay_open: bool,
+        inactivity_enabled: bool,
+        inactivity_timeout: float,
+        codex_capture_only: bool,
+    ) -> None:
+        self.session = session
+        self.stay_open = stay_open
+        self.inactivity_enabled = inactivity_enabled
+        self.inactivity_timeout = inactivity_timeout
+        self.codex_capture_only = codex_capture_only
+        self.events = session.events().__aiter__()
+        self.event_task = asyncio.create_task(anext(self.events))
+        self.screen_task = asyncio.create_task(session.terminal.capture_screen())
+        self.eof_task = asyncio.create_task(wait_for_stdin_eof())
+        self.tasks = {self.event_task, self.screen_task, self.eof_task}
+        self.last_activity = asyncio.get_running_loop().time()
+        self.last_screen_key: str | None = None
+        self.latest_screen: str = ""
+        self.structured_text = False
+
+    async def observe(self) -> None:
+        try:
+            await self.wait_for_completion()
+            if self.stay_open:
+                await self.stop_observers()
+                await wait_for_stdin_eof()
+        finally:
+            await self.stop_observers()
+
+    async def wait_for_completion(self) -> None:
+        while True:
+            done, _pending = await asyncio.wait(
+                self.tasks,
+                timeout=0.05,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # EOF wins over screen/event observations; screen precedes harness events.
+            self.observe_terminal(done)
+            if self.event_task in done:
+                event = self.take_event()
+                if self.ignores_event(event):
+                    self.request_next_event()
+                    continue
+                await self.report_event(event)
+                if event.type == "result":
+                    if await self.complete_reported_turn():
+                        return
+                    self.request_next_event()
+                    continue
+                self.request_next_event()
+            # The continue branches above deliberately skip inference for this iteration.
+            if await self.infer_completion():
+                return
+
+    def observe_terminal(self, done: set[asyncio.Task]) -> None:
+        if self.eof_task in done:
+            self.eof_task.result()
+            raise _InteractiveWorkerError(
+                "interactive worker input closed before completion"
+            )
+        if self.screen_task not in done:
+            return
+        self.tasks.discard(self.screen_task)
+        try:
+            self.latest_screen = self.screen_task.result()
+        except Exception as error:
+            raise _InteractiveWorkerError(
+                f"could not inspect interactive terminal: {error}"
+            ) from error
+        else:
+            self.record_screen_activity()
+        self.screen_task = asyncio.create_task(
+            capture_screen_after_delay(self.session, _SCREEN_POLL_INTERVAL)
+        )
+        self.tasks.add(self.screen_task)
+
+    def record_screen_activity(self) -> None:
+        screen_key = normalize_screen(self.latest_screen)
+        if screen_key != self.last_screen_key:
+            self.last_screen_key = screen_key
+            self.last_activity = asyncio.get_running_loop().time()
+        # A visible permission/login prompt suspends heuristic completion. A prompt may
+        # be in retained scrollback, so inspect only the current tail. Real screen changes
+        # during busy work reset the timer, and known busy statuses keep it suspended.
+        if is_interactive_prompt(self.latest_screen):
+            self.last_activity = asyncio.get_running_loop().time()
+        if is_interactive_busy(self.latest_screen):
+            self.last_activity = asyncio.get_running_loop().time()
+
+    def take_event(self) -> StreamEvent:
+        self.tasks.discard(self.event_task)
+        try:
+            return self.event_task.result()
+        except StopAsyncIteration:
+            raise _InteractiveWorkerError(
+                "interactive harness exited before reporting a completed turn"
+            )
+        except Exception as error:
+            raise _InteractiveWorkerError(str(error)) from error
+
+    def ignores_event(self, event: StreamEvent) -> bool:
+        # Codex's notify hook can provide stale or unrelated assistant text. Its
+        # turn-complete capability is therefore ignored in favor of the visible UI.
+        return self.codex_capture_only and event.type in {"system", "text", "result"}
+
+    def request_next_event(self) -> None:
+        self.event_task = asyncio.create_task(anext(self.events))
+        self.tasks.add(self.event_task)
+
+    async def report_event(self, event: StreamEvent) -> None:
+        emit_event(event)
+        if event.type in {"system", "status", "tool_use", "text"}:
+            self.last_activity = asyncio.get_running_loop().time()
+        if event.type == "text":
+            self.structured_text = self.structured_text or bool(event.content.strip())
+        if event.type == "error":
+            await self.capture_unstructured_output(
+                _PARTIAL_CAPTURE_LABEL,
+                "Interactive harness reported an error before structured output; "
+                "terminal capture may be incomplete.",
+            )
+            raise _InteractiveWorkerError(
+                event.content or "interactive harness reported an error"
+            )
+        if event.type == "process_exit":
+            await self.capture_unstructured_output(
+                _PARTIAL_CAPTURE_LABEL,
+                "Interactive harness exited before structured output; terminal "
+                "capture may be incomplete.",
+            )
+            raise _InteractiveWorkerError(
+                "interactive harness exited before reporting a completed turn"
+            )
+        if event.type == "result" and event.content != "ok":
+            await self.capture_unstructured_output(
+                _PARTIAL_CAPTURE_LABEL,
+                "Interactive harness reported an unsuccessful result "
+                "before structured output; terminal capture may be incomplete.",
+            )
+            reason = event.error or "interactive harness reported an unsuccessful result"
+            raise _InteractiveWorkerError(reason)
+
+    async def complete_reported_turn(self) -> bool:
+        if "turn_complete" not in self.session.capabilities:
+            return False
+        await self.capture_unstructured_output(
+            "Terminal capture (may be incomplete)",
+            "Interactive result had no structured text; terminal capture "
+            "may be incomplete.",
+        )
+        await self.deliver_complete()
+        return True
+
+    async def deliver_complete(self) -> None:
+        if not self.stay_open and not self.session.terminal.closed:
+            await self.session.close()
         emit({"kind": "complete"})
 
-    async def stop_observers() -> None:
-        current = tuple(tasks)
-        tasks.clear()
+    async def stop_observers(self) -> None:
+        current = tuple(self.tasks)
+        self.tasks.clear()
         for task in current:
             task.cancel()
         await asyncio.gather(*current, return_exceptions=True)
 
+    async def capture_unstructured_output(self, label: str, warning: str) -> None:
+        if not self.structured_text:
+            await self.emit_terminal_capture(label, warning)
+
     async def emit_terminal_capture(
+        self,
         label: str,
         warning: str | None = None,
         screen: str | None = None,
     ) -> None:
-        nonlocal latest_screen
         if screen is None:
             try:
-                screen = await session.terminal.capture_screen()
+                captured_screen: str = await self.session.terminal.capture_screen()
+                screen = captured_screen
             except Exception as error:
                 raise _InteractiveWorkerError(
                     f"could not capture interactive terminal: {error}"
                 ) from error
-        latest_screen = screen
+        self.latest_screen = screen
         if warning is not None:
             emit({"kind": "warning", "message": warning})
         capture = screen or "<empty terminal capture>"
@@ -388,196 +554,70 @@ async def observe_interactive(
             content=f"{label}:\n{capture}",
         ))
 
-    async def infer_completion() -> bool:
-        nonlocal last_activity, last_screen_key, latest_screen
+    def can_infer_completion(self) -> bool:
         now = asyncio.get_running_loop().time()
-        if (
-            (not codex_capture_only and "turn_complete" in session.capabilities)
-            or not inactivity_enabled
-            or session.terminal.returncode is not None
-            or now - last_activity < inactivity_timeout
-        ):
-            return False
+        return not (
+            (not self.codex_capture_only and "turn_complete" in self.session.capabilities)
+            or not self.inactivity_enabled
+            or self.session.terminal.returncode is not None
+            or now - self.last_activity < self.inactivity_timeout
+        )
 
+    async def infer_completion(self) -> bool:
+        if not self.can_infer_completion():
+            return False
         try:
-            refreshed_screen = await session.terminal.capture_screen()
+            refreshed_screen = await self.session.terminal.capture_screen()
         except Exception as error:
             raise _InteractiveWorkerError(
                 f"could not inspect interactive terminal: {error}"
             ) from error
         refreshed_key = normalize_screen(refreshed_screen)
-        latest_screen = refreshed_screen
-        if refreshed_key != last_screen_key:
-            last_screen_key = refreshed_key
-            last_activity = asyncio.get_running_loop().time()
+        self.latest_screen = refreshed_screen
+        if refreshed_key != self.last_screen_key:
+            self.last_screen_key = refreshed_key
+            self.last_activity = asyncio.get_running_loop().time()
             return False
-        if event_task.done() or screen_task.done() or eof_task.done():
+        if self.event_task.done() or self.screen_task.done() or self.eof_task.done():
             # Process completed lifecycle, harness, or screen observations in the main
             # loop before deciding that the turn is idle.
             return False
-        if session.terminal.returncode is not None:
+        if self.session.terminal.returncode is not None:
             # The process may have exited while the awaited screen refresh was running;
             # let the session's event grace deliver process_exit instead of inferring success.
             return False
         if is_interactive_prompt(refreshed_screen) or is_interactive_busy(refreshed_screen):
-            last_activity = asyncio.get_running_loop().time()
+            self.last_activity = asyncio.get_running_loop().time()
             return False
-        if asyncio.get_running_loop().time() - last_activity < inactivity_timeout:
+        if asyncio.get_running_loop().time() - self.last_activity < self.inactivity_timeout:
             return False
 
-        emit({
-            "kind": "warning",
-            "message": (
-                (
-                    "Codex interactive uses interim terminal-capture mode: completion "
-                    "notifications are ignored because their payload is unreliable; "
-                    "completion was inferred after "
-                    f"{inactivity_timeout:g} seconds of inactivity, and terminal capture "
-                    "may be incomplete."
-                )
-                if codex_capture_only
-                else (
-                    "Interactive completion was inferred after "
-                    f"{inactivity_timeout:g} seconds of inactivity; "
-                    "the harness did not report a completed turn."
-                )
-            ),
-        })
-        if not structured_text:
-            await emit_terminal_capture(
+        emit({"kind": "warning", "message": self.inactivity_warning()})
+        if not self.structured_text:
+            await self.emit_terminal_capture(
                 "Terminal capture (heuristic; may be incomplete)",
                 screen=refreshed_screen,
             )
         # Keep existing consumers' terminal-result contract. The warning explicitly
         # records that this result was inferred rather than proven by the harness.
-        emit_event(StreamEvent(
-            type="result",
-            content="ok",
-        ))
-        await deliver_complete()
+        emit_event(StreamEvent(type="result", content="ok"))
+        await self.deliver_complete()
         return True
 
-    try:
-        while True:
-            done, _pending = await asyncio.wait(
-                tasks,
-                timeout=0.05,
-                return_when=asyncio.FIRST_COMPLETED,
+    def inactivity_warning(self) -> str:
+        if self.codex_capture_only:
+            return (
+                "Codex interactive uses interim terminal-capture mode: completion "
+                "notifications are ignored because their payload is unreliable; "
+                "completion was inferred after "
+                f"{self.inactivity_timeout:g} seconds of inactivity, and terminal capture "
+                "may be incomplete."
             )
-
-            if eof_task in done:
-                eof_task.result()
-                raise _InteractiveWorkerError(
-                    "interactive worker input closed before completion"
-                )
-
-            if screen_task in done:
-                tasks.discard(screen_task)
-                try:
-                    latest_screen = screen_task.result()
-                except Exception as error:
-                    raise _InteractiveWorkerError(
-                        f"could not inspect interactive terminal: {error}"
-                    ) from error
-                else:
-                    screen_key = normalize_screen(latest_screen)
-                    if screen_key != last_screen_key:
-                        last_screen_key = screen_key
-                        last_activity = asyncio.get_running_loop().time()
-                    # A visible permission/login prompt suspends heuristic completion. A
-                    # prompt may be in retained scrollback, so the helper inspects only the
-                    # current tail of the capture. Real screen changes during busy work reset
-                    # the timer, and known busy statuses keep it suspended.
-                    if is_interactive_prompt(latest_screen):
-                        last_activity = asyncio.get_running_loop().time()
-                    if is_interactive_busy(latest_screen):
-                        last_activity = asyncio.get_running_loop().time()
-                screen_task = asyncio.create_task(
-                    capture_screen_after_delay(session, _SCREEN_POLL_INTERVAL)
-                )
-                tasks.add(screen_task)
-
-            if event_task in done:
-                tasks.discard(event_task)
-                try:
-                    event = event_task.result()
-                except StopAsyncIteration:
-                    raise _InteractiveWorkerError(
-                        "interactive harness exited before reporting a completed turn"
-                    )
-                except Exception as error:
-                    raise _InteractiveWorkerError(str(error)) from error
-
-                if codex_capture_only and event.type in {"system", "text", "result"}:
-                    # Codex's notify hook can provide stale or unrelated assistant text. Its
-                    # turn-complete capability is therefore ignored in favor of the visible UI.
-                    event_task = asyncio.create_task(anext(events))
-                    tasks.add(event_task)
-                    continue
-
-                emit_event(event)
-                if event.type in {"system", "status", "tool_use", "text"}:
-                    last_activity = asyncio.get_running_loop().time()
-                if event.type == "text":
-                    structured_text = structured_text or bool(event.content.strip())
-                if event.type == "error":
-                    if not structured_text:
-                        await emit_terminal_capture(
-                            _PARTIAL_CAPTURE_LABEL,
-                            "Interactive harness reported an error before structured output; "
-                            "terminal capture may be incomplete.",
-                        )
-                    raise _InteractiveWorkerError(
-                        event.content or "interactive harness reported an error"
-                    )
-                if event.type == "process_exit":
-                    if not structured_text:
-                        await emit_terminal_capture(
-                            _PARTIAL_CAPTURE_LABEL,
-                            "Interactive harness exited before structured output; terminal "
-                            "capture may be incomplete.",
-                        )
-                    raise _InteractiveWorkerError(
-                        "interactive harness exited before reporting a completed turn"
-                    )
-                if event.type == "result":
-                    if event.content != "ok":
-                        if not structured_text:
-                            await emit_terminal_capture(
-                                _PARTIAL_CAPTURE_LABEL,
-                                "Interactive harness reported an unsuccessful result "
-                                "before structured output; terminal capture may be incomplete.",
-                            )
-                        reason = event.error or (
-                            "interactive harness reported an unsuccessful result"
-                        )
-                        raise _InteractiveWorkerError(reason)
-                    if "turn_complete" not in session.capabilities:
-                        event_task = asyncio.create_task(anext(events))
-                        tasks.add(event_task)
-                        continue
-                    if not structured_text:
-                        await emit_terminal_capture(
-                            "Terminal capture (may be incomplete)",
-                            "Interactive result had no structured text; terminal capture "
-                            "may be incomplete.",
-                        )
-                    await deliver_complete()
-                    if stay_open:
-                        await stop_observers()
-                        await wait_for_stdin_eof()
-                    return 0
-
-                event_task = asyncio.create_task(anext(events))
-                tasks.add(event_task)
-
-            if await infer_completion():
-                if stay_open:
-                    await stop_observers()
-                    await wait_for_stdin_eof()
-                return 0
-    finally:
-        await stop_observers()
+        return (
+            "Interactive completion was inferred after "
+            f"{self.inactivity_timeout:g} seconds of inactivity; "
+            "the harness did not report a completed turn."
+        )
 
 
 async def capture_screen_after_delay(session, delay: float) -> str:

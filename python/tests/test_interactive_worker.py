@@ -104,6 +104,7 @@ class InteractiveWorkerTest(unittest.TestCase):
         request,
         *,
         intercept_second_capture=False,
+        fail_capture_at=None,
     ):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -116,6 +117,7 @@ class InteractiveWorkerTest(unittest.TestCase):
                 fake_bin / "tmux",
                 socket_path,
                 intercept_second_capture=intercept_second_capture,
+                fail_capture_at=fail_capture_at,
             )
             session_name = f"agentshell-test-{uuid.uuid4().hex}"
             process = None
@@ -751,6 +753,222 @@ class InteractiveWorkerTest(unittest.TestCase):
             self.assertEqual(messages[-1]["kind"], "fatal")
             self.assertNotIn("complete", [message["kind"] for message in messages])
 
+    def test_structured_turn_keeps_event_order_and_does_not_capture_after_blank_text(self) -> None:
+        # Arrange: one batch includes activity, real text, then whitespace and two turns.
+        records = [
+            {"type": "session_start", "session_id": "characterized-session"},
+            {"type": "agent_start"},
+            {"type": "tool_execution_start", "toolName": "read"},
+            self.pi_text("structured answer"),
+            self.pi_text(" \n"),
+            *self.pi_result(),
+            self.pi_text("ignored second turn"),
+            *self.pi_result(),
+        ]
+        # Act
+        messages, code = self.run_pi_records(records)
+        # Assert: exact wire payloads, including default metrics and the success exit status.
+        self.assertEqual(code, 0)
+        self.assertEqual(messages, [
+            self.wire_event("system", "", session_id="characterized-session"),
+            self.wire_event("status", "turn_started"),
+            self.wire_event("tool_use", "read"),
+            self.wire_event("text", "structured answer"),
+            self.wire_event("text", " \n"),
+            self.wire_event("result", "ok"),
+            {"kind": "complete"},
+        ])
+
+    def test_success_without_nonblank_text_captures_before_complete(self) -> None:
+        for text_records in ([], [self.pi_text(" \t")]):
+            with self.subTest(text_records=text_records):
+                # Arrange / Act
+                messages, code = self.run_pi_records([*text_records, *self.pi_result()])
+                # Assert: whitespace is emitted but is not usable structured output.
+                self.assertEqual(code, 0)
+                tail = messages[len(text_records):]
+                self.assertEqual(tail[0], self.wire_event("result", "ok"))
+                self.assertEqual(tail[1], {
+                    "kind": "warning",
+                    "message": "Interactive result had no structured text; terminal capture "
+                               "may be incomplete.",
+                })
+                self.assert_capture(tail[2], "Terminal capture (may be incomplete)")
+                self.assertEqual(tail[3:], [{"kind": "complete"}])
+
+    def test_failures_preserve_partial_capture_policy_and_fatal_reason(self) -> None:
+        failures = [
+            ([{"type": "agent_settled"}], None,
+             "Pi settled without a run result", "error",
+             "Interactive harness reported an error before structured output; "
+             "terminal capture may be incomplete."),
+            (self.pi_result("error"), None, "model rejected request", "result",
+             "Interactive harness reported an unsuccessful result before structured output; "
+             "terminal capture may be incomplete."),
+            ([], 17, "interactive harness exited before reporting a completed turn", "process_exit",
+             "Interactive harness exited before structured output; terminal capture "
+             "may be incomplete."),
+        ]
+        for records, exit_code, reason, event_type, warning in failures:
+            for structured in (False, True):
+                with self.subTest(event_type=event_type, structured=structured):
+                    # Arrange: trailing blank text must not erase earlier structured text.
+                    prefix = [self.pi_text("answer")] if structured else []
+                    prefix.append(self.pi_text(" \t"))
+                    # Act
+                    messages, code = self.run_pi_records(prefix + records, exit_code=exit_code)
+                    # Assert
+                    self.assertEqual(code, 1)
+                    tail = messages[len(prefix):]
+                    self.assertEqual(tail[0]["event"]["type"], event_type)
+                    if not structured:
+                        self.assertEqual(tail[1], {"kind": "warning", "message": warning})
+                        self.assert_capture(
+                            tail[2], "Terminal capture (partial; may be incomplete)",
+                        )
+                    self.assertEqual(tail[-1], {"kind": "fatal", "message": reason})
+                    self.assertEqual(len(tail), 2 if structured else 4)
+
+    def test_turn_complete_capability_waits_for_result_despite_idle_screen(self) -> None:
+        # Arrange: Pi advertises turn_complete, but only emits text, not a result.
+        with self.launch_worker(
+            "pi", lambda path: self.install_pi_records(path, [self.pi_text("answer")]),
+            {"agent_type": "pi", "prompt": "hello", "interactive": True,
+             "inactivity_timeout": 0.1},
+        ) as (process, _root, _socket, _session, _pane):
+            messages = self.read_until(process, "event", timeout=5)
+            # Act: wait well past inactivity, then close the public lifecycle pipe.
+            time.sleep(0.4)
+            self.assertIsNone(process.poll())
+            process.stdin.close()
+            process.wait(timeout=5)
+            messages += self.remaining_messages(process)
+            # Assert
+            self.assertEqual(process.returncode, 1)
+            self.assertEqual(messages, [
+                self.wire_event("text", "answer"),
+                {"kind": "fatal", "message": "interactive worker input closed before completion"},
+            ])
+
+    def test_structured_stay_open_stops_delivery_until_parent_eof(self) -> None:
+        # Arrange: later text/error records are queued behind the first completed turn.
+        records = [self.pi_text("answer"), *self.pi_result(), self.pi_text("later"),
+                   {"type": "agent_settled"}]
+        with self.launch_worker(
+            "pi", lambda path: self.install_pi_records(path, records),
+            {"agent_type": "pi", "prompt": "hello", "interactive": True, "stay_open": True},
+        ) as (process, _root, socket, session, pane):
+            # Act
+            messages = self.read_until(process, "complete", timeout=5)
+            time.sleep(0.3)
+            self.assertIsNone(process.poll())
+            process.stdin.close()
+            process.wait(timeout=5)
+            messages += self.remaining_messages(process)
+            # Assert: no second result/error, successful EOF, only the parent's pane remains.
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(messages, [self.wire_event("text", "answer"),
+                                       self.wire_event("result", "ok"), {"kind": "complete"}])
+            self.assertEqual(self.tmux(socket, "list-panes", "-t", f"{session}:0",
+                                       "-F", "#{pane_id}").stdout.strip(), pane)
+
+    def test_screen_poll_and_idle_refresh_failures_do_not_infer_success(self) -> None:
+        for capture_number in (1, 2):
+            with self.subTest(capture_number=capture_number):
+                # Arrange: timeout precedes the next poll, so capture #2 is the idle refresh.
+                with self.launch_worker(
+                    "cursor-agent", self.install_fake_cursor,
+                    {"agent_type": "cursor", "prompt": "hello", "interactive": True,
+                     "inactivity_timeout": 0.1},
+                    fail_capture_at=capture_number,
+                ) as (process, _root, socket, session, pane):
+                    # Act
+                    process.wait(timeout=5)
+                    messages = self.remaining_messages(process)
+                    # Assert
+                    self.assertEqual(process.returncode, 1)
+                    self.assertEqual(messages, [{
+                        "kind": "fatal",
+                        "message": "could not inspect interactive terminal: "
+                                   "scripted capture failure",
+                    }])
+                    self.assertEqual(self.tmux(socket, "list-panes", "-t", f"{session}:0",
+                                               "-F", "#{pane_id}").stdout.strip(), pane)
+
+    def test_sigint_cancels_observation_and_closes_owned_pane(self) -> None:
+        # Arrange: an active structured session with a pending next event and screen poll.
+        with self.launch_worker(
+            "pi", lambda path: self.install_pi_records(path, [self.pi_text("answer")]),
+            {"agent_type": "pi", "prompt": "hello", "interactive": True},
+        ) as (process, _root, socket, session, pane):
+            messages = self.read_until(process, "event", timeout=5)
+            # Act: asyncio.run translates SIGINT into cancellation of the worker task.
+            process.send_signal(signal.SIGINT)
+            process.wait(timeout=5)
+            messages += self.remaining_messages(process)
+            # Assert: cancellation is not translated into a fatal protocol error or success.
+            self.assertEqual(process.returncode, -signal.SIGINT)
+            self.assertEqual(messages, [self.wire_event("text", "answer")])
+            self.assertEqual(self.tmux(socket, "list-panes", "-t", f"{session}:0",
+                                       "-F", "#{pane_id}").stdout.strip(), pane)
+
+    def run_pi_records(self, records, *, exit_code=None):
+        with self.launch_worker(
+            "pi", lambda path: self.install_pi_records(path, records, exit_code=exit_code),
+            {"agent_type": "pi", "prompt": "hello", "interactive": True},
+        ) as (process, _root, _socket, _session, _pane):
+            # A complete/fatal record terminates the worker; read through stdout EOF so a
+            # duplicate or unexpected trailing record cannot be hidden by read_until().
+            process.wait(timeout=5)
+            return self.remaining_messages(process), process.returncode
+
+    @staticmethod
+    def remaining_messages(process):
+        return [json.loads(line) for line in process.stdout.read().decode().splitlines()]
+
+    @staticmethod
+    def wire_event(event_type, content, **extra):
+        return {"kind": "event", "event": {
+            "type": event_type, "content": content, "cost": 0.0, "duration": 0.0,
+            "output_tokens": 0, **extra,
+        }}
+
+    def assert_capture(self, message, label):
+        self.assertEqual(message["event"]["type"], "text")
+        self.assertTrue(message["event"]["content"].startswith(label + ":\n"), message)
+        self.assertIn("VISIBLE_PI_SCREEN", message["event"]["content"])
+
+    @staticmethod
+    def pi_text(content):
+        return {"type": "message_update", "assistantMessageEvent": {
+            "type": "text_end", "content": content,
+        }}
+
+    @staticmethod
+    def pi_result(stop_reason="stop"):
+        return [
+            {"type": "agent_end", "messages": [{
+                "role": "assistant", "stopReason": stop_reason,
+                "errorMessage": "model rejected request",
+            }]},
+            {"type": "agent_settled"},
+        ]
+
+    @staticmethod
+    def install_pi_records(path, records, *, exit_code=None):
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, signal, sys\n"
+            "from pathlib import Path\n"
+            "print('VISIBLE_PI_SCREEN', flush=True)\n"
+            "events = Path(sys.argv[sys.argv.index('--extension') + 1]).parent / 'events.jsonl'\n"
+            f"records = {records!r}\n"
+            "events.write_text(''.join(json.dumps(record) + '\\n' for record in records))\n"
+            + ("signal.pause()\n" if exit_code is None else f"sys.exit({exit_code})\n"),
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+
     @staticmethod
     def install_fake_codex(path: Path) -> None:
         path.write_text(
@@ -1029,6 +1247,7 @@ class InteractiveWorkerTest(unittest.TestCase):
         socket_path: Path,
         *,
         intercept_second_capture: bool = False,
+        fail_capture_at: int | None = None,
     ) -> None:
         tmux_binary = shutil.which("tmux")
         if tmux_binary is None:
@@ -1036,6 +1255,20 @@ class InteractiveWorkerTest(unittest.TestCase):
         tmux_command = shlex.quote(tmux_binary)
         socket = shlex.quote(str(socket_path))
         script = "#!/bin/sh\n"
+        if fail_capture_at is not None:
+            count_file = shlex.quote(str(socket_path.with_suffix(".capture-count")))
+            script += (
+                'for argument in "$@"; do\n'
+                '  case "$argument" in capture-pane|"capture-pane "*)\n'
+                f"    count=$(cat {count_file} 2>/dev/null || printf '0')\n"
+                '    count=$((count + 1))\n'
+                f'    printf "%s\\n" "$count" > {count_file}\n'
+                f'    if [ "$count" -eq {fail_capture_at} ]; then\n'
+                '      echo "scripted capture failure" >&2; exit 17\n'
+                '    fi ;;\n'
+                '  esac\n'
+                'done\n'
+            )
         if intercept_second_capture:
             capture_count = shlex.quote(str(socket_path.with_suffix(".capture-count")))
             script += (
@@ -1124,7 +1357,9 @@ class InteractiveWorkerTest(unittest.TestCase):
             ready, _, _ = select.select([process.stdout], [], [], remaining)
             if not ready:
                 break
-            chunk = os.read(process.stdout.fileno(), 64 * 1024)
+            # Leave bytes after the requested record for the next read/assertion. A large
+            # read can silently discard a duplicate completion or error from the same chunk.
+            chunk = os.read(process.stdout.fileno(), 1)
             if not chunk:
                 break
             pending += chunk
