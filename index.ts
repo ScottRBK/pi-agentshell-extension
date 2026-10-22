@@ -835,7 +835,7 @@ function createSubagentParameters(agentTypes: string[]) {
     })),
     roster_entry: Type.Optional(Type.String({
       minLength: 1,
-      description: "Name from subagent_roster. Conflicting manual launch settings are rejected.",
+      description: "Name from subagent_roster. The roster entry supplies resources and roster_file; omit them or pass null. Don't pass {} or manual resource settings unless they exactly match the selected entry.",
     })),
     roster_file: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
       description: "Pi-only child roster file; relative to effective cwd for ad-hoc calls. " +
