@@ -20,6 +20,11 @@ export default function packageHarness(pi: ExtensionAPI): void {
       /extensions[\\/]agentshell\.ts/,
       "package did not load its conventional extension entry point",
     );
+    if (process.env.PACKAGE_EXPECTED_ROOT) {
+      const expectedRoot = JSON.stringify(process.env.PACKAGE_EXPECTED_ROOT).slice(1, -1);
+      assert.ok(JSON.stringify(subagent.sourceInfo).includes(expectedRoot),
+        "package loaded from outside the extracted archive");
+    }
     process.stderr.write("PACKAGE_HARNESS_OK\n");
   });
 }

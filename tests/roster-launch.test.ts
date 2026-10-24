@@ -17,7 +17,8 @@ function runHarness(scenario: string): void {
     "PI_AGENT_SHELL_MAX_DEPTH", "PI_AGENTSHELL_ROSTER_FILE", "TMUX", "TMUX_PANE"]) delete env[key];
   const socket = join(root, "tmux.sock");
   const tmux = spawnSync("/bin/sh", ["-c", "command -v tmux"], { encoding: "utf8" }).stdout.trim();
-  const interactive = scenario === "interactive" || scenario === "resume-controls-interactive";
+  const interactive = ["interactive", "resume-controls-interactive", "agent-files-interactive",
+    "prompt-skills-interactive"].includes(scenario);
   try {
     if (interactive) {
       const server = spawnSync(tmux, ["-f", "/dev/null", "-S", socket,
@@ -45,6 +46,106 @@ function runHarness(scenario: string): void {
 
 test("launches a named roster entry and rejects unknown or conflicting settings", () => {
   runHarness("named");
+});
+
+test("agent files supply named child settings and resolve paths from the child's file", () => {
+  runHarness("agent-files");
+});
+
+test("normalized Codex skills preserve full briefing and append selected file references", () => {
+  runHarness("codex-prompt-skills");
+});
+
+test("normalized Claude skills preserve briefing and controls in foreground and background", () => {
+  runHarness("claude-prompt-skills");
+});
+
+test("normalized interactive Codex and Claude receive skills and release owned panes", () => {
+  runHarness("prompt-skills-interactive");
+});
+
+test("prompt skills discover roots in stable order and retain lexical symlink paths", () => {
+  runHarness("prompt-skill-directories");
+});
+
+test("prompt skill discovery rejects empty, cyclic, unreadable and invalid paths", () => {
+  runHarness("prompt-skill-failures");
+});
+
+test("prompt skill mapping preserves native options and other capability errors", () => {
+  runHarness("prompt-skill-native-options");
+});
+
+test("Codex prompt skills retain canonical selection across reload, resume and branches", () => {
+  runHarness("prompt-skill-resume-codex");
+});
+
+test("Claude prompt skills retain canonical selection across reload, resume and branches", () => {
+  runHarness("prompt-skill-resume-claude");
+});
+
+test("prompt skill directories expand membership on foreground and background resume", () => {
+  runHarness("prompt-skill-membership");
+});
+
+test("prompt skills leave native Pi/OpenCode, other apps and inline/ad-hoc calls unchanged", () => {
+  runHarness("prompt-skill-scope");
+});
+
+test("inline roster load errors preserve the exact diagnostic without an Error prefix", () => {
+  runHarness("inline-diagnostic");
+});
+
+test("nested normalized load errors identify both files without repeated Error prefixes", () => {
+  runHarness("nested-diagnostic");
+});
+
+test("selected and child agent symlinks retain lexical reference and resource bases", () => {
+  runHarness("agent-files-symlinks");
+});
+
+test("different agent files cannot declare the same roster name", () => {
+  runHarness("agent-files-duplicate-names");
+});
+
+test("native inline and global roster entries reject agent_file references and overrides", () => {
+  runHarness("native-reference-rejection");
+});
+
+test("normalized non-Pi leaves launch but cannot configure Pi delegation", () => {
+  runHarness("agent-files-nonpi");
+});
+
+test("normalized snapshots reject edits before reload and preserve resumed identity", () => {
+  runHarness("agent-files-resume");
+});
+
+test("normalized definitions reject malformed, missing and overriding configuration", () => {
+  runHarness("agent-files-invalid");
+});
+
+test("normalized rosters load only one hop and allow cyclic references", () => {
+  runHarness("agent-files-cycles");
+});
+
+test("normalized children scope selectors, enforce conflicts and preserve ad-hoc launches", () => {
+  runHarness("agent-files-scoping");
+});
+
+test("normalized resources retain native capability errors in direct and background modes", () => {
+  runHarness("agent-files-capabilities");
+});
+
+test("normalized background sessions preserve parent, branch and resource continuity", () => {
+  runHarness("agent-files-ownership");
+});
+
+test("normalized interactive selections retain uncertainty and clean up native processes", () => {
+  runHarness("agent-files-interactive");
+});
+
+test("normalized background cancellation stops its owned native process", () => {
+  runHarness("agent-files-cancel");
 });
 
 test("launch validation preserves the first error without starting a worker", () => {

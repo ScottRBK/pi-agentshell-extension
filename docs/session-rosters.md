@@ -9,8 +9,127 @@ settings file, system prompt, or delegation policy. For example, an external lau
 PI_AGENTSHELL_ROSTER_FILE=/workspace/.factory/agents/foreman/roster.json pi
 ```
 
-No Factory integration is implemented by this extension. Names below are ordinary entry names,
-not built-in roles. This example file describes the child the foreman session may launch:
+The selected file supports either a native inline roster or a normalized agent definition.
+Both formats use the existing `subagent_roster` and `subagent` tools. No Factory-specific roles
+are built in, and no Factory integration or root launcher is implemented by this extension.
+
+### Normalized agent definitions
+
+An `agent.json` contains exactly `agent` and `roster`. For example, the parent definition is:
+
+```json
+{
+  "agent": {
+    "name": "foreman",
+    "description": "Coordinate delivery",
+    "agent_type": "pi",
+    "model": "provider/model-selector",
+    "effort": "high"
+  },
+  "roster": {
+    "enabled": true,
+    "roles": [{ "agent_file": "../feature-owner/agent.json" }]
+  }
+}
+```
+
+The referenced `../feature-owner/agent.json` owns that agent's settings:
+
+```json
+{
+  "agent": {
+    "name": "feature-owner",
+    "description": "Own a feature",
+    "agent_type": "pi",
+    "model": "provider/child-model-selector",
+    "effort": "medium",
+    "resources": {
+      "skills": ["./skills/ownership/SKILL.md"]
+    }
+  },
+  "roster": { "enabled": false, "roles": [] }
+}
+```
+
+Provision the illustrated paths and replace the model selectors before use. Each `agent`
+requires nonempty `name`, `description`, `agent_type`, `model`, and `effort` strings. Its only
+optional fields are `cwd` and `resources`. Names are arbitrary and case-sensitive; resolved
+names must be unique within each roster. Model/effort support remains the native harness's job.
+There is no `instructions` field: use native AGENTS.md discovery and selected skills.
+
+Each normalized roster entry contains exactly `agent_file`, referencing another normalized
+definition. No inline settings, aliases, per-parent overrides or separate child `roster_file`
+belong in this format. `roster.enabled` defaults to false and `roster.roles` defaults to [].
+Pi children automatically receive their own agent file as their roster selection, including
+leaves with disabled, empty rosters. Non-Pi definitions must have a disabled, empty roster;
+configuring Pi delegation on another harness is rejected rather than silently ignored.
+
+References resolve against their containing file. Child cwd/resources resolve against the
+child file, not the parent's file or the worktree. Omit cwd to retain the caller-supplied
+worktree (or tool context cwd); an explicit cwd is authoritative. A role-directory AGENTS.md
+does not automatically load when the effective cwd is a different worktree.
+
+Select the parent with `PI_AGENTSHELL_ROSTER_FILE=/path/to/foreman/agent.json`. This selects
+only its roster section. It does not apply its own agent section to the current Pi. Similarly,
+an ad-hoc call's `roster_file` can select an agent.json roster while keeping the call's explicit
+launch settings. Root bootstrap belongs to the external launcher; no parent/global settings
+are mutated and no copied configuration files are generated.
+
+Loading reads only the selected document and its direct child definitions. Their reference
+paths are validated, but their referenced documents are not read until those children launch.
+Self references and cyclic references are valid. This bounds traversal depth, not file size
+or roster length. Runtime delegation depth still limits launches independently of parsing.
+
+### Selected skills for normalized Codex and Claude children
+
+For a normalized selected child with `agent_type: "codex"` or `"claude_code"`, the extension
+delivers selected skills as prompt references. It preserves the caller's full briefing verbatim
+and appends a read-before-work block with JSON-quoted absolute skill file paths. For example:
+
+```text
+Selected skill files: read and follow these before doing the assigned task.
+- "/workspace/agents/implementation/skills/role/SKILL.md"
+- "/workspace/skills/tdd/SKILL.md"
+```
+
+The caller must still supply the full role briefing, task, worktree, review and permission
+requirements. Callers can include explicit skill references themselves; the appended block ensures
+selected files are also listed when those references are omitted. No file bodies are embedded.
+Delivery of a reference does not prove that a model reads or follows it. No skills means no block.
+
+This mapping applies only when a named child comes from `agent_file`. Pi, OpenCode and other
+harnesses keep their native behavior. Native inline rosters and ad-hoc resource calls also keep
+their existing behavior, including native unsupported-skills errors for Codex and Claude.
+
+For these prompt references, discovery follows this portable rule:
+
+- An explicit readable regular file selects itself, regardless of its filename.
+- A directory containing `SKILL.md` selects that file and stops discovery at that root.
+- Otherwise, search child directories for skill roots. Ignore hidden child directories and
+  `node_modules`. Unrelated Markdown files in collections are not selected.
+- Keep lexical absolute paths based on the child agent file, including symlink paths. Detect
+  ancestor directory cycles by physical identity. Sort file paths and remove exact path duplicates;
+  two different lexical paths to the same physical file remain distinct references.
+- Reject missing, unreadable or nonregular selected files, failed traversal, cycles and selected
+  directories with no skill files before starting a worker or background job.
+
+This is not Pi native loader parity: no YAML parsing or native discovery/ignore-rule emulation
+is performed. Directory membership and file contents are not frozen. Discovery runs on every
+launch and resume, so additions and removals can change the references without changing the
+selected directory path. A later empty directory fails. Path validation is not atomic with launch.
+
+Roster output and saved session selections retain the complete original `resources.skills` list,
+including directories. Skill path edits still require reload for new calls and cannot retarget
+saved sessions. Source, override and resume checks happen before prompt mapping. Only the outbound
+native request uses `skills: []`; every other resource option, cwd and permission control remains
+unchanged. The resource object is retained even when it contains only default values. Unsupported
+other options still fail natively. Claude plugins/MCP remain native resources; this mapping does
+not add unsupported Codex/Claude native skill options or change global configuration.
+
+### Native inline rosters
+
+Existing native roster-only files and personal inline rosters remain supported. This example
+describes a child the foreman session may launch:
 
 ```json
 {
@@ -47,7 +166,7 @@ one supported by the native harness. The child's `roster.json` uses the same sha
 entries such as `implementation` and `reviewer`. It describes that child's children, not its own
 resources. A roster can refer back to another roster; files are not recursively expanded at load.
 
-The selected file must contain exactly the top-level `roster` key. Unknown settings, duplicate
+The native inline file contains exactly the top-level `roster` key. Unknown settings, duplicate
 names, malformed JSON, invalid resource values, and missing paths are errors, not fallback requests.
 Referenced paths and entries are checked even when `enabled` is `false`; disabling a roster does
 not skip validation of explicitly supplied configuration. Errors identify the source file and entry.
@@ -106,10 +225,11 @@ subagent({
 })
 ```
 
-Use `interactive: true` for the native tmux UI. The same resources reach AgentShell's public
-`SessionResources` through both `stream` and `open_interactive`. Unsupported resource combinations
-raise before the native agent starts. In background mode, worker validation errors arrive as job
-failures; they do not mean an agent ran with weaker exclusions.
+Use `interactive: true` for the native tmux UI. Resources reach AgentShell's public
+`SessionResources` through both `stream` and `open_interactive`, with the normalized Codex/Claude
+prompt-skill mapping described above. Unsupported resource combinations raise before the native
+agent starts. In background mode, worker validation errors arrive as job failures; they do not
+mean an agent ran with weaker exclusions.
 
 ## Paths and child environments
 
@@ -135,6 +255,13 @@ failures; they do not mean an agent ran with weaker exclusions.
 With an explicit file it is an in-memory toggle; `/reload` restores the file's `enabled` value.
 Roster entries are snapshots at extension load. Reload after editing entries. An explicitly
 selected child roster is checked again at launch and resume.
+
+For normalized definitions, the parent's membership and the direct children's own agent
+settings are load-time snapshots. Before each launch/resume, the selected child's definition
+is reread and compared with its snapshot. Changed/deleted definitions fail instead of silently
+launching stale settings. Run `/reload` to use edited definitions for fresh sessions. Parent
+membership edits also require reload. A child's own roster is read at launch, so edits to that
+roster before its first launch are visible without reloading the parent.
 
 The inherited maximum delegation depth still applies before extension startup, regardless of the
 child's roster or harness. Local configuration cannot reset it. With discovery excluded, explicitly
@@ -208,6 +335,11 @@ or resources. Approval and tool controls are never restored.
 - A roster-selected session keeps its harness, cwd, resources, roster source/entry, child roster,
   and roster-defined model/effort. Omitting `roster_entry` does not remove that contract. A changed
   entry or child roster content is rejected. If its roster is now disabled, re-enable it first.
+- Normalized selections also retain the child agent file's identity, including non-Pi leaves.
+  Changes to that definition or its source path reject resume before native launch. Reload does
+  not authorize new settings for an existing session; start a new one. The saved child roster
+  includes its direct children's settings, so changes there also reject resume. Deeper graph
+  contents are not frozen. Comparisons use parsed settings, not raw JSON formatting.
 - Ad-hoc sessions with explicit resources or a child roster keep their harness, cwd and resource/
   child-roster selection. Their model and effort may change on resume.
 - Ordinary ad-hoc sessions without those selections retain explicit-argument resume behavior,
@@ -249,12 +381,16 @@ Limits of this guarantee:
 
 ## External launchers and validation
 
-A future Factory integration must provision these local files, supply the launch environment
-variable, choose cwd, and retain the returned native ID with its owning parent-session context.
-It must arrange native authentication separately and respect the inherited depth limit. No Factory
-code or AgentShell library changes are required or included here.
+An external launcher such as Factory must provision these local files, read the root agent's
+own settings and explicitly launch it with those settings plus its roster environment selector.
+It must retain the returned native ID with its owning parent-session context, arrange native
+authentication separately and respect the inherited depth limit. Init is first-time provisioning;
+later agent/model/skill edits use the files and documented reload/new-session behavior, without
+reconciliation or regenerated copies. No Factory code or AgentShell library changes are included.
 
 Regression tests use the existing public config loaders, registered Pi tools, and worker JSON-line
 boundary. Only native processes are doubled; real AgentShell translates resources in headless and
 isolated-tmux paths. Temporary homes/state and owned sockets avoid personal configuration. These
 checks make no model calls and do not establish live authentication or crash-recovery guarantees.
+Normalized-definition tests exercise registered tools and the public extension/lifecycle boundary;
+they do not test private parsers. The native package-install test is separate from these checks.

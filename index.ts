@@ -12,8 +12,10 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 
 import {
+  loadAgentShellAgentFile,
   loadAgentShellConfig,
   loadAgentShellRosterFile,
+  resolvePromptSkillFiles,
   resolveSessionResources,
   setRosterEnabled,
   type AgentShellInteractiveConfig,
@@ -835,7 +837,9 @@ function createSubagentParameters(agentTypes: string[]) {
     })),
     roster_entry: Type.Optional(Type.String({
       minLength: 1,
-      description: "Name from subagent_roster. The roster entry supplies resources and roster_file; omit them or pass null. Don't pass {} or manual resource settings unless they exactly match the selected entry.",
+      description: "Name from subagent_roster. The roster entry supplies resources and " +
+        "roster_file; omit them or pass null. Don't pass {} or manual resource settings " +
+        "unless they exactly match the selected entry.",
     })),
     roster_file: Type.Optional(Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
       description: "Pi-only child roster file; relative to effective cwd for ad-hoc calls. " +
@@ -1023,9 +1027,21 @@ function selectRosterRole(
   }
   if (saved?.role && !isDeepStrictEqual(role, saved.role)) {
     const changed = (["name", "description", "agent_type", "model", "effort", "cwd",
-      "resources", "roster_file"] as const)
+      "resources", "roster_file", "agent_file"] as const)
       .filter((key) => !isDeepStrictEqual(role?.[key], saved.role?.[key]));
     throw new Error(`Original roster_entry changed: ${changed.join(", ")}`);
+  }
+  if (role?.agent_file) {
+    const current = loadAgentShellAgentFile(role.agent_file);
+    const changed = (Object.keys(current) as Array<keyof AgentShellRosterRole>)
+      .filter((key) => !isDeepStrictEqual(current[key], role[key]));
+    for (const key of Object.keys(role) as Array<keyof AgentShellRosterRole>) {
+      if (!(key in current)) changed.push(key);
+    }
+    if (changed.length) {
+      throw new Error(`Agent definition changed at ${role.agent_file}: ${changed.join(", ")}. `
+        + "Run /reload for new launches; start a new session for changed settings.");
+    }
   }
   return role;
 }
@@ -1131,6 +1147,16 @@ function prepareSubagentLaunch(
     request: { ...settings, auto_approve: settings.auto_approve ?? false }, role, childRoster,
     rosterSource: role ? rosterSource : undefined });
   validateResumeSelection(saved, selection);
+  // Keep the canonical selection above; only this native dispatch copy uses prompt skills.
+  if (role?.agent_file && ["codex", "claude_code"].includes(request.agent_type)
+    && request.resources) {
+    const files = resolvePromptSkillFiles(request.resources.skills);
+    return { request: { ...request, resources: { ...request.resources, skills: [] },
+      prompt: request.prompt + (files.length ? "\n\n"
+        + "Selected skill files: read and follow these before doing the assigned task.\n"
+        + files.map((path) => `- ${JSON.stringify(path)}`).join("\n") : "") },
+      selection, taskName: params.task_name };
+  }
   return { request, selection, taskName: params.task_name };
 }
 

@@ -288,16 +288,56 @@ To select a different roster without changing Pi home, login, or personal prefer
 PI_AGENTSHELL_ROSTER_FILE=/workspace/agents/lead/roster.json pi
 ```
 
-The selected JSON file contains **only** the `roster` key, with the same shape above. It cannot
-change output limits, interactive defaults, silent mode, or delegation depth. Explicit missing or
-invalid files fail; they never fall back to the personal roster. Referenced paths and entries are
-validated even when the roster is disabled. With an override,
+The selected JSON file can contain **only** the `roster` key, with the inline shape above, or be
+an `agent.json` with exactly `agent` and `roster`. A normalized agent owns its launch settings;
+its roster contains only references to other agent files:
+
+```json
+{
+  "agent": {
+    "name": "lead",
+    "description": "Coordinate work",
+    "agent_type": "pi",
+    "model": "provider/model-selector",
+    "effort": "high"
+  },
+  "roster": {
+    "enabled": true,
+    "roles": [{ "agent_file": "../reviewer/agent.json" }]
+  }
+}
+```
+
+Select it with `PI_AGENTSHELL_ROSTER_FILE=/workspace/agents/lead/agent.json`. The referenced
+agent's own `name` supplies `roster_entry`; its model/resources are never copied into the parent.
+References resolve against the parent file; child cwd/resources resolve against the child file.
+Omitted child cwd preserves the caller's worktree. Pi children receive their own agent file as
+their roster selection. Non-Pi definitions must have a disabled, empty roster.
+
+Both selectors (`PI_AGENTSHELL_ROSTER_FILE` and the tool's `roster_file`) select only a roster.
+They do not apply an agent file's own settings to an already-running Pi or an ad-hoc launch.
+An external launcher must bootstrap the root agent's model, effort, cwd and resources separately.
+
+A selected file cannot change output limits, interactive defaults, silent mode or depth.
+Explicit missing or invalid files fail; they never fall back to the personal roster.
+Referenced paths and entries are validated even when the roster is disabled. With an override,
 `/agentshell-roster` toggles only this process's in-memory roster and writes neither file.
 Reload restores the file's `enabled` value. Without an override, existing default behavior remains.
 
-See [session rosters](docs/session-rosters.md) for the complete resource shape, path rules,
-child environment handling, resume guarantees, and external-launcher requirements. Run `/reload`
-after editing a roster.
+For normalized selected Codex/Claude children, selected skills become JSON-quoted absolute file
+references in a read-before-work block appended to the caller's unchanged full briefing. Only
+the outbound native request clears `resources.skills`; all other options and the saved selection
+remain intact. Pi/OpenCode native skills, other harnesses and inline/ad-hoc calls are unchanged.
+The caller still supplies the full briefing. Reference delivery does not prove model compliance.
+Directories use portable `SKILL.md` discovery, keeping lexical paths and rejecting invalid/empty
+selections and ancestor cycles. Directory membership is expanded again on every call, including
+resume; file contents are not frozen. No skill bodies are read or embedded by the extension.
+
+See [session rosters](docs/session-rosters.md) for the exact discovery rule, resource shape,
+path rules, child environments, resume guarantees, and external-launcher requirements.
+Run `/reload` after editing a roster or referenced agent settings. A changed child definition blocks
+launches from the old snapshot. Reload enables fresh launches; existing selected sessions keep their
+original settings and reject conflicting resumes.
 
 ### Resuming a Subagent
 
@@ -427,6 +467,11 @@ env -u PI_AGENT_SHELL_CHILD -u PI_AGENT_SHELL_DEPTH -u PI_AGENT_SHELL_MAX_DEPTH 
   -u PI_AGENTSHELL_ROSTER_FILE npm test
 npm run test:python
 ```
+
+`npm test` and CI exclude `install:` checks, including the real `pi install` test. The ordinary
+suite packs the runtime, loads the extracted archive through Pi's local-package loader, and checks
+registered tools without installation or inference. That fixture reuses the already installed locked
+Python environment; it does not test downloading or installing dependencies.
 
 Interactive integration tests use dedicated tmux sockets and deterministic CLI fixtures. They
 exercise real pane input, result delivery, and cleanup without making model requests. Never run
