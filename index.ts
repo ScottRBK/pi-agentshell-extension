@@ -1191,6 +1191,8 @@ async function registerSubagentTool(
       "For background jobs, the extension automatically delivers the result " +
         "using a follow-up turn.",
       "While a background job runs, continue other work or remain idle until notified.",
+      "If you have no independent work, end your response. The extension will start a new " +
+        "turn when the subagent completes.",
       "The real resumable session ID arrives with the completion result.",
       RESUME_SESSION_GUIDANCE,
       ...(enabled ? [
