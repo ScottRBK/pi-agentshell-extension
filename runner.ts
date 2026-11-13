@@ -116,6 +116,36 @@ export function isAgentShellRuntimeInstalled(): boolean {
   return agentShellRuntimeProbe().installed;
 }
 
+/**
+ * Why setup cannot work here, as lines ready to show a user, or null when it
+ * can. Offering to install a runtime that cannot be installed sends people off
+ * installing uv on a machine where the real problem is that nothing is
+ * writable.
+ */
+export function agentShellSetupBlocker(): string[] | null {
+  if (agentShellRuntimeIsInjected()) {
+    return [
+      "PI_AGENT_SHELL_PYTHON points at an interpreter that cannot import agent_shell:",
+      `  ${RUNTIME_INTERPRETER}`,
+      "Install agent-shell-py into that environment, or unset the variable to let",
+      "this extension install its own runtime.",
+    ];
+  }
+
+  try {
+    accessSync(AGENT_SHELL_PROJECT_DIRECTORY, constants.W_OK);
+  } catch {
+    return [
+      `This AgentShell install is read-only: ${AGENT_SHELL_PROJECT_DIRECTORY}`,
+      "Point PI_AGENT_SHELL_PYTHON at an interpreter that already imports",
+      "agent_shell, or set PI_AGENT_SHELL_RUNTIME_DIR to a writable directory",
+      "for the virtualenv.",
+    ];
+  }
+
+  return null;
+}
+
 export function agentShellSetupCommand(): string {
   const relocation = RUNTIME_ENVIRONMENT
     ? `UV_PROJECT_ENVIRONMENT="${RUNTIME_ENVIRONMENT}" `

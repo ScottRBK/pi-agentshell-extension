@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
+  mkdirSync,
   mkdtempSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -146,4 +149,74 @@ test("the probe reports the agent_shell version the interpreter provides", () =>
   // Assert
   assert.equal(probe.installed, true);
   assert.equal(probe.version, "0.5.0");
+});
+
+/** Reads the blocker from a copy of the extension, so its directory can be made read-only. */
+function blockerFromLayout(
+  layout: "writable" | "read-only",
+  env: Record<string, string> = {},
+): string[] | null {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), "pi-nix-blocker-"));
+
+  try {
+    for (const file of ["runner.ts", "limits.ts"]) {
+      copyFileSync(
+        join(dirname(RUNNER), file),
+        join(directory, file),
+      );
+    }
+
+    // The blocker checks the install directory, which must exist to be
+    // writable.
+    mkdirSync(join(directory, "python"), { recursive: true });
+
+    if (layout === "read-only") {
+      chmodSync(join(directory, "python"), 0o555);
+      chmodSync(directory, 0o555);
+    }
+
+    const result = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", [
+        `import { agentShellSetupBlocker } from ${JSON.stringify(join(directory, "runner.ts"))};`,
+        "console.log(JSON.stringify(agentShellSetupBlocker()));",
+      ].join(" ")],
+      { env: { ...process.env, ...env }, encoding: "utf8", timeout: 20_000 },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  } finally {
+    chmodSync(directory, 0o755);
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("setup is offered when the install directory is writable", () => {
+  // Act
+  const blocker = blockerFromLayout("writable");
+
+  // Assert
+  assert.equal(blocker, null);
+});
+
+test("a read-only install names the variables that fix it", () => {
+  // Act
+  const blocker = blockerFromLayout("read-only") ?? [];
+
+  // Assert
+  assert.match(blocker.join(" "), /read-only/);
+  assert.match(blocker.join(" "), /PI_AGENT_SHELL_PYTHON/);
+  assert.match(blocker.join(" "), /PI_AGENT_SHELL_RUNTIME_DIR/);
+  assert.doesNotMatch(blocker.join(" "), /uv/);
+});
+
+test("an injected interpreter that cannot import names itself", () => {
+  // Act
+  const blocker = blockerFromLayout("writable", {
+    PI_AGENT_SHELL_PYTHON: join(tmpdir(), "nix-store", "bin", "python"),
+  }) ?? [];
+
+  // Assert
+  assert.match(blocker.join(" "), /PI_AGENT_SHELL_PYTHON/);
 });
