@@ -31,6 +31,7 @@ import {
 import type { AgentShellLimits } from "./limits.ts";
 import {
   AGENT_SHELL_PROJECT_DIRECTORY,
+  agentShellSetupBlocker,
   agentShellSetupCommand,
   closeAgentShellWorkers,
   getAgentShellModels,
@@ -1697,6 +1698,21 @@ export default async function subagentsExtension(
     }
 
     setupAttempted = true;
+
+    // Never offer a setup that cannot succeed: an injected runtime is not ours
+    // to install, and a read-only install cannot hold a virtualenv.
+    const blocker = agentShellSetupBlocker();
+
+    if (blocker !== null) {
+      if (!ctx.hasUI) {
+        process.stderr.write(`${blocker.join(" ")}\n`);
+        return;
+      }
+
+      ctx.ui.notify(blocker.join("\n"), "error");
+      return;
+    }
+
     const command = agentShellSetupCommand();
 
     if (!ctx.hasUI) {

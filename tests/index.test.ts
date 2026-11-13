@@ -109,7 +109,11 @@ function runInteractiveIndexHarness(oldRuntime = false): ReturnType<typeof spawn
     fakePython,
     "#!/bin/sh\n" +
       "if [ \"$2\" = \"-c\" ]; then\n" +
-      (oldRuntime ? "  exit 1\n" : "  exit 0\n") +
+      // The readiness probe only needs agent_shell to import; the capability
+      // probes are what an old runtime lacks.
+      (oldRuntime
+        ? "  case \"$3\" in *'import agent_shell'*) exit 0 ;; esac\n  exit 1\n"
+        : "  exit 0\n") +
       "fi\n" +
       "trap '' INT TERM\n" +
       "IFS= read -r request || [ -n \"$request\" ] || exit 1\n" +

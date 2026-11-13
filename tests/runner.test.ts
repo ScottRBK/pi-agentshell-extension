@@ -223,7 +223,13 @@ test("keeps the AgentShell runtime available without model discovery", async () 
             join(temporaryExtension, "limits.ts"),
         );
         const temporaryPython = join(temporaryBin, "python");
-        writeFileSync(temporaryPython, "#!/bin/sh\nexit 1\n", "utf8");
+        // Imports agent_shell, but predates model discovery: the runtime is
+        // available and the capability is not.
+        writeFileSync(
+            temporaryPython,
+            "#!/bin/sh\ncase \"$*\" in\n  *list_models*) exit 1 ;;\n  *) exit 0 ;;\nesac\n",
+            "utf8",
+        );
         chmodSync(temporaryPython, 0o755);
 
         const temporaryRunner = await import(

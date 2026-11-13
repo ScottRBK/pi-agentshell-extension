@@ -12,22 +12,151 @@ import {
 
 const EXTENSION_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * A prebuilt interpreter that already imports agent_shell. Set it when the
+ * extension cannot install its own runtime - a Nix store path is read-only, so
+ * `uv sync` can never create a virtualenv next to the code. When it is set the
+ * extension performs no setup and writes nothing.
+ */
+const RUNTIME_INTERPRETER = process.env.PI_AGENT_SHELL_PYTHON?.trim() || "";
+
+/**
+ * Where `uv sync` should build the virtualenv. Defaults to `.venv` beside the
+ * extension. Set it when that directory is read-only but installing the
+ * dependency is still wanted.
+ */
+const RUNTIME_ENVIRONMENT = process.env.PI_AGENT_SHELL_RUNTIME_DIR?.trim() || "";
+
 export const AGENT_SHELL_PROJECT_DIRECTORY = join(
   EXTENSION_DIRECTORY,
   "python",
 );
 
-const PYTHON = join(
-  AGENT_SHELL_PROJECT_DIRECTORY,
-  ".venv",
-  "bin",
-  "python",
-);
+/**
+ * The virtualenv itself, which is what needs to move: worker.py, pyproject.toml
+ * and uv.lock are only ever read, so they stay with the extension.
+ */
+export const AGENT_SHELL_VENV_DIRECTORY =
+  RUNTIME_ENVIRONMENT || join(AGENT_SHELL_PROJECT_DIRECTORY, ".venv");
+
+if (RUNTIME_ENVIRONMENT) {
+  // uv reads this for every invocation, including the one a user copy-pastes
+  // from the setup message.
+  process.env.UV_PROJECT_ENVIRONMENT = RUNTIME_ENVIRONMENT;
+}
+
+const PYTHON =
+  RUNTIME_INTERPRETER || join(AGENT_SHELL_VENV_DIRECTORY, "bin", "python");
 
 const WORKER = join(AGENT_SHELL_PROJECT_DIRECTORY, "worker.py");
 
+/** True when the runtime is supplied from outside and setup must not run. */
+export function agentShellRuntimeIsInjected(): boolean {
+  return RUNTIME_INTERPRETER !== "";
+}
+
+/**
+ * The runtime is usable when this interpreter can import agent_shell, which is
+ * the only property the extension depends on. Reporting the version in the same
+ * pass costs nothing and matters because an injected interpreter is not bound by
+ * uv.lock: a Nix-built environment can be any version at all.
+ */
+const RUNTIME_PROBE_SOURCE = [
+  "import agent_shell",
+  "try:",
+  "    from importlib.metadata import version",
+  "    print(version('agent-shell-py'))",
+  "except Exception:",
+  "    print(getattr(agent_shell, '__version__', 'unknown'))",
+].join("\n");
+
+interface AgentShellRuntimeProbe {
+  readonly installed: boolean;
+  readonly version: string | null;
+}
+
+let runtimeProbe: AgentShellRuntimeProbe | undefined;
+
+function probeAgentShellRuntime(): AgentShellRuntimeProbe {
+  try {
+    accessSync(PYTHON, constants.X_OK);
+  } catch {
+    return { installed: false, version: null };
+  }
+
+  const probe = spawnSync(PYTHON, ["-I", "-c", RUNTIME_PROBE_SOURCE], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 5_000,
+  });
+
+  if (probe.status !== 0) {
+    return { installed: false, version: null };
+  }
+
+  return { installed: true, version: probe.stdout.trim() || null };
+}
+
+/**
+ * Probed once per load. Repairing a broken runtime means restarting Pi or
+ * running /reload, which reloads this module, so a cached answer cannot go
+ * stale in a way anyone would notice.
+ */
+export function agentShellRuntimeProbe(): AgentShellRuntimeProbe {
+  runtimeProbe ??= probeAgentShellRuntime();
+  return runtimeProbe;
+}
+
+/** Version the runtime reports for itself, or null when it reports none. */
+export function agentShellRuntimeVersion(): string | null {
+  return agentShellRuntimeProbe().version;
+}
+
+export function isAgentShellRuntimeInstalled(): boolean {
+  return agentShellRuntimeProbe().installed;
+}
+
+/**
+ * Why setup cannot work here, as lines ready to show a user, or null when it
+ * can. Offering to install a runtime that cannot be installed sends people off
+ * installing uv on a machine where the real problem is that nothing is
+ * writable.
+ */
+export function agentShellSetupBlocker(): string[] | null {
+  if (agentShellRuntimeIsInjected()) {
+    // Only a probe can say the interpreter is unusable; the variable being set
+    // proves nothing about it.
+    if (agentShellRuntimeProbe().installed) {
+      return null;
+    }
+
+    return [
+      "PI_AGENT_SHELL_PYTHON points at an interpreter that cannot import agent_shell:",
+      `  ${RUNTIME_INTERPRETER}`,
+      "Install agent-shell-py into that environment, or unset the variable to let",
+      "this extension install its own runtime.",
+    ];
+  }
+
+  try {
+    accessSync(AGENT_SHELL_PROJECT_DIRECTORY, constants.W_OK);
+  } catch {
+    return [
+      `This AgentShell install is read-only: ${AGENT_SHELL_PROJECT_DIRECTORY}`,
+      "Point PI_AGENT_SHELL_PYTHON at an interpreter that already imports",
+      "agent_shell, or set PI_AGENT_SHELL_RUNTIME_DIR to a writable directory",
+      "for the virtualenv.",
+    ];
+  }
+
+  return null;
+}
+
 export function agentShellSetupCommand(): string {
-  return `uv sync --project "${AGENT_SHELL_PROJECT_DIRECTORY}" --locked --no-build`;
+  const relocation = RUNTIME_ENVIRONMENT
+    ? `UV_PROJECT_ENVIRONMENT="${RUNTIME_ENVIRONMENT}" `
+    : "";
+  return `${relocation}uv sync --project "${AGENT_SHELL_PROJECT_DIRECTORY}" --locked --no-build`;
 }
 
 export interface AgentShellDelegation {
@@ -308,15 +437,6 @@ function formatModelListLimitFailure(maxOutputBytes: number): string {
     "Increase max_output_bytes in your AgentShell extension " +
       "configuration to override it.",
   ].join("\n");
-}
-
-export function isAgentShellRuntimeInstalled(): boolean {
-  try {
-    accessSync(PYTHON, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export function supportsAgentShellModelDiscovery(): boolean {

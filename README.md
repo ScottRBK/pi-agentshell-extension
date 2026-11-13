@@ -17,7 +17,8 @@ conversation message. JSON and print sessions wait inside the tool call and retu
 
 - Linux, macOS, or WSL2
 - Pi
-- [uv](https://docs.astral.sh/uv/getting-started/)
+- [uv](https://docs.astral.sh/uv/getting-started/), unless you supply your own
+  interpreter via `PI_AGENT_SHELL_PYTHON`
 - Python 3.12 or newer, which uv can provide
 - The chosen coding-agent CLI installed and authenticated, such as Codex, Claude Code, or Grok
 
@@ -40,6 +41,39 @@ The first time Pi starts with the extension installed, it will:
 - Check whether `uv` is available
 - Ask for permission to run `uv sync --locked --no-build`, which installs the AgentShell wheel
 - Register the tool immediately after setup
+
+An interpreter supplied through `PI_AGENT_SHELL_PYTHON` skips that first step:
+the extension checks it can import `agent_shell` and registers the tool.
+
+## Runtime Location
+
+By default the extension installs AgentShell into `.venv` beside its own code.
+When the install directory cannot be written to - a Nix store path, for example
+- two variables change where the runtime comes from:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `PI_AGENT_SHELL_PYTHON` | unset | An interpreter that already imports `agent_shell`. Setup is skipped entirely and nothing is written beside the extension. |
+| `PI_AGENT_SHELL_RUNTIME_DIR` | `<extension>/python/.venv` | Where `uv sync` builds the virtualenv. Passed to uv as `UV_PROJECT_ENVIRONMENT`. |
+
+Neither is needed for a normal install. If `PI_AGENT_SHELL_PYTHON` is set but
+cannot import `agent_shell`, the extension says so rather than offering to
+install anything.
+
+### Nix
+
+The `agent-shell` flake already builds a Python environment in which
+`import agent_shell` works with no `PYTHONPATH`:
+
+```nix
+{
+  home.sessionVariables = {
+    PI_AGENT_SHELL_PYTHON = "${agent-shell.packages.${system}.env}/bin/python";
+  };
+}
+```
+
+With that set, the extension needs neither `uv` nor network access at startup.
 
 ## Usage
 
