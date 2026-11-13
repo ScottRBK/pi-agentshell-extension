@@ -124,6 +124,12 @@ export function isAgentShellRuntimeInstalled(): boolean {
  */
 export function agentShellSetupBlocker(): string[] | null {
   if (agentShellRuntimeIsInjected()) {
+    // Only a probe can say the interpreter is unusable; the variable being set
+    // proves nothing about it.
+    if (agentShellRuntimeProbe().installed) {
+      return null;
+    }
+
     return [
       "PI_AGENT_SHELL_PYTHON points at an interpreter that cannot import agent_shell:",
       `  ${RUNTIME_INTERPRETER}`,

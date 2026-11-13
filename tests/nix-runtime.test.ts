@@ -17,6 +17,18 @@ import { test } from "node:test";
 
 const RUNNER = fileURLToPath(new URL("../runner.ts", import.meta.url));
 
+/**
+ * A developer's own shell may already export these, which would silently change
+ * what the "no override" cases measure.
+ */
+function scrubRuntimeEnv(env: Record<string, string>): NodeJS.ProcessEnv {
+  const base: NodeJS.ProcessEnv = { ...process.env };
+  delete base.PI_AGENT_SHELL_PYTHON;
+  delete base.PI_AGENT_SHELL_RUNTIME_DIR;
+  delete base.UV_PROJECT_ENVIRONMENT;
+  return { ...base, ...env };
+}
+
 interface RuntimeLayout {
   projectDirectory: string;
   venvDirectory: string;
@@ -45,7 +57,7 @@ function inspectLayout(env: Record<string, string>): RuntimeLayout {
   const result = spawnSync(
     process.execPath,
     ["--input-type=module", "-e", script],
-    { env: { ...process.env, ...env }, encoding: "utf8", timeout: 20_000 },
+    { env: scrubRuntimeEnv(env), encoding: "utf8", timeout: 20_000 },
   );
 
   assert.equal(result.status, 0, result.stderr);
@@ -181,7 +193,7 @@ function blockerFromLayout(
         `import { agentShellSetupBlocker } from ${JSON.stringify(join(directory, "runner.ts"))};`,
         "console.log(JSON.stringify(agentShellSetupBlocker()));",
       ].join(" ")],
-      { env: { ...process.env, ...env }, encoding: "utf8", timeout: 20_000 },
+      { env: scrubRuntimeEnv(env), encoding: "utf8", timeout: 20_000 },
     );
 
     assert.equal(result.status, 0, result.stderr);
@@ -219,4 +231,26 @@ test("an injected interpreter that cannot import names itself", () => {
 
   // Assert
   assert.match(blocker.join(" "), /PI_AGENT_SHELL_PYTHON/);
+});
+
+test("a working injected interpreter raises no blocker", () => {
+  // Arrange: an interpreter that imports agent_shell, next to a read-only
+  // install - the normal Nix case.
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), "pi-nix-good-"));
+  const interpreter = join(directory, "python");
+
+  try {
+    writeFileSync(interpreter, "#!/bin/sh\necho 0.5.0\nexit 0\n", "utf8");
+    chmodSync(interpreter, 0o755);
+
+    // Act
+    const blocker = blockerFromLayout("read-only", {
+      PI_AGENT_SHELL_PYTHON: interpreter,
+    });
+
+    // Assert: setup is not offered, and no failure is invented.
+    assert.equal(blocker, null);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
