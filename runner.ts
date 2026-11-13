@@ -12,22 +12,54 @@ import {
 
 const EXTENSION_DIRECTORY = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * A prebuilt interpreter that already imports agent_shell. Set it when the
+ * extension cannot install its own runtime - a Nix store path is read-only, so
+ * `uv sync` can never create a virtualenv next to the code. When it is set the
+ * extension performs no setup and writes nothing.
+ */
+const RUNTIME_INTERPRETER = process.env.PI_AGENT_SHELL_PYTHON?.trim() || "";
+
+/**
+ * Where `uv sync` should build the virtualenv. Defaults to `.venv` beside the
+ * extension. Set it when that directory is read-only but installing the
+ * dependency is still wanted.
+ */
+const RUNTIME_ENVIRONMENT = process.env.PI_AGENT_SHELL_RUNTIME_DIR?.trim() || "";
+
 export const AGENT_SHELL_PROJECT_DIRECTORY = join(
   EXTENSION_DIRECTORY,
   "python",
 );
 
-const PYTHON = join(
-  AGENT_SHELL_PROJECT_DIRECTORY,
-  ".venv",
-  "bin",
-  "python",
-);
+/**
+ * The virtualenv itself, which is what needs to move: worker.py, pyproject.toml
+ * and uv.lock are only ever read, so they stay with the extension.
+ */
+export const AGENT_SHELL_VENV_DIRECTORY =
+  RUNTIME_ENVIRONMENT || join(AGENT_SHELL_PROJECT_DIRECTORY, ".venv");
+
+if (RUNTIME_ENVIRONMENT) {
+  // uv reads this for every invocation, including the one a user copy-pastes
+  // from the setup message.
+  process.env.UV_PROJECT_ENVIRONMENT = RUNTIME_ENVIRONMENT;
+}
+
+const PYTHON =
+  RUNTIME_INTERPRETER || join(AGENT_SHELL_VENV_DIRECTORY, "bin", "python");
 
 const WORKER = join(AGENT_SHELL_PROJECT_DIRECTORY, "worker.py");
 
+/** True when the runtime is supplied from outside and setup must not run. */
+export function agentShellRuntimeIsInjected(): boolean {
+  return RUNTIME_INTERPRETER !== "";
+}
+
 export function agentShellSetupCommand(): string {
-  return `uv sync --project "${AGENT_SHELL_PROJECT_DIRECTORY}" --locked --no-build`;
+  const relocation = RUNTIME_ENVIRONMENT
+    ? `UV_PROJECT_ENVIRONMENT="${RUNTIME_ENVIRONMENT}" `
+    : "";
+  return `${relocation}uv sync --project "${AGENT_SHELL_PROJECT_DIRECTORY}" --locked --no-build`;
 }
 
 export interface AgentShellDelegation {
