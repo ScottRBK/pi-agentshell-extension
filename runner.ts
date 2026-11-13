@@ -55,6 +55,67 @@ export function agentShellRuntimeIsInjected(): boolean {
   return RUNTIME_INTERPRETER !== "";
 }
 
+/**
+ * The runtime is usable when this interpreter can import agent_shell, which is
+ * the only property the extension depends on. Reporting the version in the same
+ * pass costs nothing and matters because an injected interpreter is not bound by
+ * uv.lock: a Nix-built environment can be any version at all.
+ */
+const RUNTIME_PROBE_SOURCE = [
+  "import agent_shell",
+  "try:",
+  "    from importlib.metadata import version",
+  "    print(version('agent-shell-py'))",
+  "except Exception:",
+  "    print(getattr(agent_shell, '__version__', 'unknown'))",
+].join("\n");
+
+interface AgentShellRuntimeProbe {
+  readonly installed: boolean;
+  readonly version: string | null;
+}
+
+let runtimeProbe: AgentShellRuntimeProbe | undefined;
+
+function probeAgentShellRuntime(): AgentShellRuntimeProbe {
+  try {
+    accessSync(PYTHON, constants.X_OK);
+  } catch {
+    return { installed: false, version: null };
+  }
+
+  const probe = spawnSync(PYTHON, ["-I", "-c", RUNTIME_PROBE_SOURCE], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 5_000,
+  });
+
+  if (probe.status !== 0) {
+    return { installed: false, version: null };
+  }
+
+  return { installed: true, version: probe.stdout.trim() || null };
+}
+
+/**
+ * Probed once per load. Repairing a broken runtime means restarting Pi or
+ * running /reload, which reloads this module, so a cached answer cannot go
+ * stale in a way anyone would notice.
+ */
+export function agentShellRuntimeProbe(): AgentShellRuntimeProbe {
+  runtimeProbe ??= probeAgentShellRuntime();
+  return runtimeProbe;
+}
+
+/** Version the runtime reports for itself, or null when it reports none. */
+export function agentShellRuntimeVersion(): string | null {
+  return agentShellRuntimeProbe().version;
+}
+
+export function isAgentShellRuntimeInstalled(): boolean {
+  return agentShellRuntimeProbe().installed;
+}
+
 export function agentShellSetupCommand(): string {
   const relocation = RUNTIME_ENVIRONMENT
     ? `UV_PROJECT_ENVIRONMENT="${RUNTIME_ENVIRONMENT}" `
@@ -340,15 +401,6 @@ function formatModelListLimitFailure(maxOutputBytes: number): string {
     "Increase max_output_bytes in your AgentShell extension " +
       "configuration to override it.",
   ].join("\n");
-}
-
-export function isAgentShellRuntimeInstalled(): boolean {
-  try {
-    accessSync(PYTHON, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export function supportsAgentShellModelDiscovery(): boolean {

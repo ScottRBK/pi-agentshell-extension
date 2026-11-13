@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,4 +92,58 @@ test("PI_AGENT_SHELL_RUNTIME_DIR relocates the virtualenv uv creates", () => {
       `uv sync --project "${layout.projectDirectory}" --locked --no-build`,
   );
   assert.notEqual(layout.venvDirectory, join(layout.projectDirectory, ".venv"));
+});
+
+interface ProbeResult {
+  installed: boolean;
+  version: string | null;
+}
+
+function probeInterpreter(script: string): ProbeResult {
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), "pi-nix-probe-"));
+  const interpreter = join(directory, "python");
+
+  try {
+    writeFileSync(interpreter, script, "utf8");
+    chmodSync(interpreter, 0o755);
+
+    const result = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", [
+        `import { isAgentShellRuntimeInstalled, agentShellRuntimeVersion } from ${JSON.stringify(RUNNER)};`,
+        "console.log(JSON.stringify({",
+        "  installed: isAgentShellRuntimeInstalled(),",
+        "  version: agentShellRuntimeVersion(),",
+        "}));",
+      ].join(" ")],
+      {
+        env: { ...process.env, PI_AGENT_SHELL_PYTHON: interpreter },
+        encoding: "utf8",
+        timeout: 20_000,
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("an interpreter that cannot import agent_shell is not a runtime", () => {
+  // Act: executable, so a file-exists check would have accepted it.
+  const probe = probeInterpreter("#!/bin/sh\nexit 1\n");
+
+  // Assert
+  assert.equal(probe.installed, false);
+  assert.equal(probe.version, null);
+});
+
+test("the probe reports the agent_shell version the interpreter provides", () => {
+  // Act
+  const probe = probeInterpreter("#!/bin/sh\necho 0.5.0\nexit 0\n");
+
+  // Assert
+  assert.equal(probe.installed, true);
+  assert.equal(probe.version, "0.5.0");
 });
