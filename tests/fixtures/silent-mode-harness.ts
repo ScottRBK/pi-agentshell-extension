@@ -405,7 +405,8 @@ export default async function silentModeHarness(): Promise<void> {
         { job_id: silentJobId },
       );
       assert.equal(deliveringStatus.details.status, "delivering");
-      assert.match(deliveringStatus.content[0]?.text ?? "", /Final result is waiting for delivery/);
+      assert.match(deliveringStatus.content[0]?.text ?? "", /ready and queued for delivery/);
+      assert.match(deliveringStatus.content[0]?.text ?? "", /End your response and the result will arrive in the next turn/);
       assert.doesNotMatch(deliveringStatus.content[0]?.text ?? "", /\[warning\]|\[tool\]/);
       assert.deepEqual(
         statusTool.renderResult(

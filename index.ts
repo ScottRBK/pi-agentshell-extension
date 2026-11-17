@@ -379,7 +379,9 @@ function formatJobInspection(
       `Subagent job ${job.id}: delivering`,
       `Task: ${job.taskName ?? "Subagent"}`,
       `Agent: ${runtime}`,
-      "Final result is waiting for delivery.",
+      "The final result is ready and queued for delivery.",
+      "It cannot be delivered while your turn is active; polling will not help.",
+      "End your response and the result will arrive in the next turn.",
     ].join("\n");
   }
 
@@ -769,6 +771,8 @@ function registerSubagentStatusTool(
     description: [
       "Inspect the current status and recent activity of an active subagent job.",
       "Use this when progress is useful; do not repeatedly poll the job.",
+      "A `delivering` status means the result is already queued: it is delivered only " +
+        "when your turn ends, so polling cannot deliver it. End your response instead.",
       "Activity is held only in memory and is removed after final delivery.",
     ].join(" "),
     parameters: Type.Object({
@@ -1187,6 +1191,8 @@ async function registerSubagentTool(
         "the call waits and returns the result directly, without a Job ID or follow-up.",
       "Do not repeatedly poll the process or run sleep commands.",
       "Use subagent_status only when current progress is useful.",
+      "A `delivering` status means the result is queued and can only be delivered after " +
+        "your turn ends, so polling blocks it.",
       "A Job ID is not a session ID.",
       "For background jobs, the extension automatically delivers the result " +
         "using a follow-up turn.",

@@ -1196,7 +1196,9 @@ export default async function indexHarness(): Promise<void> {
       `Subagent job ${defaultJobId}: delivering`,
       "Task: Default cwd",
       "Agent: codex/default/default",
-      "Final result is waiting for delivery.",
+      "The final result is ready and queued for delivery.",
+      "It cannot be delivered while your turn is active; polling will not help.",
+      "End your response and the result will arrive in the next turn.",
     ].join("\n");
     assert.equal(
       deliveringStatus.content[0]?.text,
