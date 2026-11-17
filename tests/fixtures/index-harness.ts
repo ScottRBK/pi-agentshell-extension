@@ -464,7 +464,9 @@ export default async function indexHarness(): Promise<void> {
       { name: "unreadable Error", error: unreadableError, expected: /Error|Unknown error/ },
       { name: "inspection failure", error: {
         get [Symbol.toStringTag]() { throw new Error("tag unreadable"); },
-      }, expected: /Unknown error/ },
+      },
+      // Newer Pi runtimes render this object instead of throwing during inspection.
+      expected: /Unknown error|Symbol\(Symbol\.toStringTag\): \[Getter\]/ },
       { name: "terminal controls", error: Object.create(null, {
         [Symbol.toStringTag]: { value: "\u001b[31mTAG\u001b[0m\r\u0007\u009b2J" },
       }), expected: /TAG/ },
@@ -506,7 +508,8 @@ export default async function indexHarness(): Promise<void> {
           await waitFor(() => diagnostics.length > 0, "delivery failure diagnostic");
           // Assert: failed delivery is removed even if its diagnostic cannot be written.
           assert.match(diagnostics[0], new RegExp(`Could not deliver subagent job ${jobId}:`));
-          assert.match(diagnostics[0], /Unknown error/);
+          // Newer Pi runtimes render this object instead of throwing during inspection.
+          assert.match(diagnostics[0], /Unknown error|message: \[Getter\]/);
           assert.equal(sentMessages.length, 0);
           await assert.rejects(statusTool.execute("diagnostic-status", { job_id: jobId },
             undefined, undefined, toolContext), /No active subagent job found/);
