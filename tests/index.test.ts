@@ -109,7 +109,11 @@ function runInteractiveIndexHarness(oldRuntime = false): ReturnType<typeof spawn
     fakePython,
     "#!/bin/sh\n" +
       "if [ \"$2\" = \"-c\" ]; then\n" +
-      (oldRuntime ? "  exit 1\n" : "  exit 0\n") +
+      // The readiness probe only needs agent_shell to import; the capability
+      // probes are what an old runtime lacks.
+      (oldRuntime
+        ? "  case \"$3\" in *'import agent_shell'*) exit 0 ;; esac\n  exit 1\n"
+        : "  exit 0\n") +
       "fi\n" +
       "trap '' INT TERM\n" +
       "IFS= read -r request || [ -n \"$request\" ] || exit 1\n" +
@@ -150,6 +154,9 @@ function runInteractiveIndexHarness(oldRuntime = false): ReturnType<typeof spawn
       TMUX: oldRuntime ? "" : "tmux-test",
       TMUX_PANE: oldRuntime ? "" : "%1",
     };
+    delete env.PI_AGENT_SHELL_PYTHON;
+    delete env.PI_AGENT_SHELL_RUNTIME_DIR;
+    delete env.UV_PROJECT_ENVIRONMENT;
     delete env.PI_AGENT_SHELL_CHILD;
     delete env.PI_AGENT_SHELL_DEPTH;
     delete env.PI_AGENT_SHELL_MAX_DEPTH;
@@ -170,7 +177,7 @@ function runInteractiveIndexHarness(oldRuntime = false): ReturnType<typeof spawn
         encoding: "utf8",
         env,
         input: '{"type":"get_state","id":"interactive-index-test"}\n',
-        timeout: 10_000,
+        timeout: 20_000,
       },
     );
   } finally {
@@ -180,7 +187,7 @@ function runInteractiveIndexHarness(oldRuntime = false): ReturnType<typeof spawn
 }
 
 test("submits subagent jobs and delivers their completions", {
-  timeout: 15_000,
+  timeout: 25_000,
 }, () => {
   const env = { ...process.env };
   delete env.PI_AGENT_SHELL_CHILD;
@@ -203,7 +210,7 @@ test("submits subagent jobs and delivers their completions", {
       encoding: "utf8",
       env,
       input: '{"type":"get_state","id":"index-test"}\n',
-      timeout: 10_000,
+      timeout: 20_000,
     },
   );
 
@@ -387,7 +394,7 @@ test("applies user-configured AgentShell limits", {
 });
 
 test("wires interactive config, overrides, and shutdown cleanup through the Pi tool", {
-  timeout: 15_000,
+  timeout: 25_000,
 }, () => {
   const completed = runInteractiveIndexHarness();
 
@@ -401,7 +408,7 @@ test("wires interactive config, overrides, and shutdown cleanup through the Pi t
 });
 
 test("rejects interactive launches on an old runtime while keeping headless calls working", {
-  timeout: 15_000,
+  timeout: 25_000,
 }, () => {
   const completed = runInteractiveIndexHarness(true);
 

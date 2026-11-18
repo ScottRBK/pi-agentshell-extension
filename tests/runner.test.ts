@@ -15,14 +15,18 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import {
+delete process.env.PI_AGENT_SHELL_PYTHON;
+delete process.env.PI_AGENT_SHELL_RUNTIME_DIR;
+delete process.env.UV_PROJECT_ENVIRONMENT;
+
+const {
     getAgentShellModels,
     getSupportedAgentTypes,
     closeAgentShellWorkers,
     isAgentShellRuntimeInstalled,
     runAgentShell,
     supportsAgentShellModelDiscovery,
-} from "../runner.ts";
+} = await import("../runner.ts");
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const PYTHON_DIR = join(ROOT, "python");
@@ -223,7 +227,13 @@ test("keeps the AgentShell runtime available without model discovery", async () 
             join(temporaryExtension, "limits.ts"),
         );
         const temporaryPython = join(temporaryBin, "python");
-        writeFileSync(temporaryPython, "#!/bin/sh\nexit 1\n", "utf8");
+        // Imports agent_shell, but predates model discovery: the runtime is
+        // available and the capability is not.
+        writeFileSync(
+            temporaryPython,
+            "#!/bin/sh\ncase \"$*\" in\n  *list_models*) exit 1 ;;\n  *) exit 0 ;;\nesac\n",
+            "utf8",
+        );
         chmodSync(temporaryPython, 0o755);
 
         const temporaryRunner = await import(

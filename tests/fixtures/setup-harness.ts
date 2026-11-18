@@ -68,8 +68,15 @@ function installFakeRuntime(outdated = false, resourcesOutdated = false): void {
   assert.ok(!realPython.includes("'"), "test Python path cannot contain a quote");
 
   mkdirSync(dirname(RUNTIME_PYTHON), { recursive: true });
+  // Reject only the capability probes. The import probe is also a `-c` probe,
+  // and a runtime that fails it counts as missing rather than old, which is a
+  // different scenario than the one this fixture stands for.
   const capabilityCheck = outdated
-    ? "if [ \"$2\" = \"-c\" ]; then exit 1; fi\n"
+    ? 'if [ "$2" = "-c" ]; then\n'
+      + '  case "$3" in\n'
+      + "    *list_models*|*open_interactive*|*TmuxExecutionHost*) exit 1;;\n"
+      + "  esac\n"
+      + "fi\n"
     : "";
 
   // Double only the worker process response from a runtime without the 0.5 resources API.

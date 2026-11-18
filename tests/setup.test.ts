@@ -81,6 +81,9 @@ for (const [name, scenario] of scenarios) {
         REAL_AGENT_SHELL_PYTHON: REAL_PYTHON,
         SETUP_SCENARIO: scenario,
       };
+      delete env.PI_AGENT_SHELL_PYTHON;
+      delete env.PI_AGENT_SHELL_RUNTIME_DIR;
+      delete env.UV_PROJECT_ENVIRONMENT;
       delete env.PI_AGENT_SHELL_CHILD;
       delete env.PI_AGENT_SHELL_DEPTH;
       delete env.PI_AGENT_SHELL_MAX_DEPTH;
