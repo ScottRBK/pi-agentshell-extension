@@ -31,12 +31,16 @@ import {
 import type { AgentShellLimits } from "./limits.ts";
 import {
   AGENT_SHELL_PROJECT_DIRECTORY,
+  agentShellSetupBlocker,
   agentShellSetupCommand,
+  agentShellSetupInvocation,
+  agentShellRuntimeUpdateGuidance,
   closeAgentShellWorkers,
   getAgentShellModels,
   getSupportedAgentTypes,
   inheritedAgentShellDelegation,
   isAgentShellRuntimeInstalled,
+  resetAgentShellRuntimeProbe,
   runAgentShell,
   supportsAgentShellInteractive,
   supportsAgentShellModelDiscovery,
@@ -1111,11 +1115,9 @@ function prepareSubagentLaunch(
   );
 
   if (interactive.interactive && !interactiveSupported) {
-    throw new Error([
-      "Interactive AgentShell runs need an updated runtime.",
-      `Run: ${agentShellSetupCommand()}`,
-      "Then restart Pi or run /reload.",
-    ].join("\n"));
+    throw new Error(
+      agentShellRuntimeUpdateGuidance("Interactive AgentShell runs need an updated runtime.").join("\n"),
+    );
   }
 
   if (params.cwd !== undefined) params = { ...params, cwd: resolve(parentCwd, params.cwd) };
@@ -1664,19 +1666,11 @@ export default async function subagentsExtension(
         const notices = [];
 
         if (!modelDiscoverySupported) {
-          notices.push([
-            "Model discovery needs an updated AgentShell runtime.",
-            `Run: ${agentShellSetupCommand()}`,
-            "Then restart Pi or run /reload.",
-          ].join("\n"));
+          notices.push(agentShellRuntimeUpdateGuidance("Model discovery needs an updated AgentShell runtime.").join("\n"));
         }
 
         if (config.interactive.enabled && !interactiveSupported) {
-          notices.push([
-            "Interactive runs need an updated AgentShell runtime.",
-            `Run: ${agentShellSetupCommand()}`,
-            "Then restart Pi or run /reload.",
-          ].join("\n"));
+          notices.push(agentShellRuntimeUpdateGuidance("Interactive runs need an updated AgentShell runtime.").join("\n"));
         }
 
         ctx.ui.notify(
@@ -1697,6 +1691,21 @@ export default async function subagentsExtension(
     }
 
     setupAttempted = true;
+
+    // Never offer a setup that cannot succeed: an injected runtime is not ours
+    // to install, and a read-only install cannot hold a virtualenv.
+    const blocker = agentShellSetupBlocker();
+
+    if (blocker !== null) {
+      if (!ctx.hasUI) {
+        process.stderr.write(`${blocker.join(" ")}\n`);
+        return;
+      }
+
+      ctx.ui.notify(blocker.join("\n"), "error");
+      return;
+    }
+
     const command = agentShellSetupCommand();
 
     if (!ctx.hasUI) {
@@ -1746,15 +1755,16 @@ export default async function subagentsExtension(
 
     ctx.ui.notify("Installing the AgentShell runtime...", "info");
 
+    const setupInvocation = agentShellSetupInvocation("uv", [
+      "sync",
+      "--project",
+      AGENT_SHELL_PROJECT_DIRECTORY,
+      "--locked",
+      "--no-build",
+    ]);
     const setup = await pi.exec(
-      "uv",
-      [
-        "sync",
-        "--project",
-        AGENT_SHELL_PROJECT_DIRECTORY,
-        "--locked",
-        "--no-build",
-      ],
+      setupInvocation.command,
+      setupInvocation.args,
     );
 
     if (setup.code !== 0) {
@@ -1771,6 +1781,9 @@ export default async function subagentsExtension(
     }
 
     try {
+      // The install may be exactly what the cached probe reported as missing,
+      // and the capability checks read that cache before registering tools.
+      resetAgentShellRuntimeProbe();
       await registerTool();
       ctx.ui.notify("The subagent tool is ready.", "info");
     } catch (error) {
